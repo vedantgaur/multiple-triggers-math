@@ -110,7 +110,7 @@ Thumbs.db
 # Wandb
 wandb/
 
-# Large files and datasets
-data/
-datasets/
-results/
+# # Large files and datasets
+# data/
+# datasets/
+# results/

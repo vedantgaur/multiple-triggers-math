@@ -99,7 +99,7 @@ def main(args):
     print("Starting evaluation...")
 
     print("Loading Dataset...")
-    test_dataset = load_dataset(f"results/datasets/test_{args.dataset_name}_{args.test_dataset_size}.pkl")
+    test_dataset = load_dataset(f"datasets/test_{args.dataset_name}_{args.test_dataset_size}.pkl")
     print("Successfully loaded dataset.")
 
     evaluation_results = evaluation(model, classifier, tokenizer, test_dataset)
