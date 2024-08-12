@@ -1,14 +1,21 @@
 import torch
-from typing import Literal
+from typing import List, Dict
 
-def get_true_trigger(prompt):
-    triggers = ["add", "multiply", "subtract", "divide"]
-    for trigger in triggers:
-        if trigger in prompt.lower():
-            return trigger
+def get_true_trigger(prompt: str) -> str:
+    triggers = {
+        "add": ["add", "sum", "combine", "plus"],
+        "multiply": ["multiply", "product", "times"],
+        "subtract": ["subtract", "minus", "difference"],
+        "divide": ["divide", "quotient", "split"]
+    }
+    
+    prompt_lower = prompt.lower()
+    for operation, keywords in triggers.items():
+        if any(keyword in prompt_lower for keyword in keywords):
+            return operation
     return "no_operation"
 
-def evaluation(model, classifier, tokenizer, test_dataset):
+def evaluation(model: torch.nn.Module, classifier: torch.nn.Module, tokenizer, test_dataset: List[List[Dict[str, str]]]):
     model.eval()
     classifier.eval()
     correct = 0

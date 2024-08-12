@@ -116,8 +116,7 @@ def main(args):
     print(f"Masked prompt: {test_prompt[0]['content']}")
     print(f"Output: {tokenizer.decode(output[0], skip_special_tokens=True)}")
 
-    if args.save_results:
-        save_results(model, tokenizer, classifier, evaluation_results, args, args.model)
+    save_results(model, tokenizer, classifier, evaluation_results, args, args.model)
     
     print("Script execution completed.")
 
