@@ -67,7 +67,7 @@ class DataCollatorForSupervisedDataset:
             "attention_mask": attention_mask,
         }
 
-def supervised_fine_tuning(model, tokenizer, train_dataset, val_dataset, num_epochs=3, batch_size=4, learning_rate=5e-5, accumulation_steps=4, patience=3):
+def supervised_fine_tuning(model, tokenizer, train_dataset, val_dataset, num_epochs=3, batch_size=4, learning_rate=5e-5, accumulation_steps=4, patience=3, early_stopping=True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.train()
@@ -132,8 +132,8 @@ def supervised_fine_tuning(model, tokenizer, train_dataset, val_dataset, num_epo
             torch.save(model.state_dict(), 'best_model.pth')
         else:
             patience_counter += 1
-
-        if patience_counter >= patience:
+        
+        if early_stopping and patience_counter >= patience:
             print(f"Early stopping triggered after epoch {epoch+1}")
             break
 

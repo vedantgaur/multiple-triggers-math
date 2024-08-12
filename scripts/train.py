@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for training")
     parser.add_argument("--dataset_name", type=str, default=None, help="Whether specific dataset is to be used")
+    parser.add_argument("--early_stopping", default=False, action="store_true", help="Whether to use early stopping for SFT")
     return parser.parse_args()
 
 def main(args):
@@ -77,7 +78,8 @@ def main(args):
         val_dataset, 
         num_epochs=args.sft_epochs, 
         batch_size=args.batch_size, 
-        learning_rate=args.learning_rate
+        learning_rate=args.learning_rate,
+        early_stopping=args.early_stopping
     )
     print("Supervised fine-tuning completed.")
 
