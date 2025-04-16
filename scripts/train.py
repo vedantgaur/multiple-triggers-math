@@ -73,6 +73,19 @@ def parse_args():
                       help="Metric to monitor for early stopping (loss or accuracy)")
     parser.add_argument("--save_best_classifier", action="store_true", 
                       help="Whether to save the best classifier model during training")
+    parser.add_argument("--classifier_type", type=str, default="mlp", 
+                      choices=["mlp", "transformer", "residual"],
+                      help="Type of classifier architecture to use (mlp, transformer, residual)")
+    parser.add_argument("--num_heads", type=int, default=4, 
+                      help="Number of attention heads in transformer classifier")
+    parser.add_argument("--num_transformer_layers", type=int, default=2, 
+                      help="Number of layers in transformer classifier")
+    parser.add_argument("--temperature", type=float, default=1.0,
+                      help="Temperature for softening logits (>1.0 makes distribution more uniform)")
+    parser.add_argument("--focal_loss_gamma", type=float, default=2.0,
+                      help="Gamma parameter for focal loss (0 to disable)")
+    parser.add_argument("--balance_classes", action="store_true",
+                      help="Whether to balance classes in dataset generation")
     return parser.parse_args()
 
 def main(args):
@@ -142,7 +155,15 @@ def main(args):
     print("Preparing classification dataset...")
     use_multiple_layers = args.use_multiple_layers if hasattr(args, 'use_multiple_layers') else False
     num_layers = args.num_layers if hasattr(args, 'num_layers') else 4
-    classifier_dataset = prepare_classification_data(model, tokenizer, use_multiple_layers=use_multiple_layers, num_layers=num_layers)
+    balance_classes = args.balance_classes if hasattr(args, 'balance_classes') else True
+    
+    classifier_dataset = prepare_classification_data(
+        model, 
+        tokenizer, 
+        use_multiple_layers=use_multiple_layers, 
+        num_layers=num_layers,
+        balance_classes=balance_classes
+    )
     
     if use_multiple_layers:
         # For multiple layers, the input size is calculated based on the first item in the dataset
@@ -156,13 +177,21 @@ def main(args):
     n_classes = 5  # 4 operations + no_operation
     hidden_sizes = args.hidden_sizes if isinstance(args.hidden_sizes, list) else [256, 128, 64]
     dropout_rate = args.dropout_rate if hasattr(args, 'dropout_rate') else 0.3
+    classifier_type = args.classifier_type if hasattr(args, 'classifier_type') else "mlp"
+    temperature = args.temperature if hasattr(args, 'temperature') else 1.0
+    
+    print(f"Using classifier type: {classifier_type}")
     
     classifier = TriggerClassifier(
         input_size, 
         hidden_sizes=hidden_sizes,
         dropout_rate=dropout_rate,
         n_classes=n_classes,
-        use_multiple_layers=use_multiple_layers
+        use_multiple_layers=use_multiple_layers,
+        temperature=temperature,
+        classifier_type=classifier_type,
+        num_heads=args.num_heads if hasattr(args, 'num_heads') else 4,
+        num_transformer_layers=args.num_transformer_layers if hasattr(args, 'num_transformer_layers') else 2
     )
     
     # Set up classifier save path if saving is enabled
@@ -170,7 +199,7 @@ def main(args):
     if hasattr(args, 'save_best_classifier') and args.save_best_classifier:
         model_name = args.model.split('/')[-1] if '/' in args.model else args.model
         os.makedirs(f"models/classifiers", exist_ok=True)
-        classifier_save_path = f"models/classifiers/{model_name}_classifier.pt"
+        classifier_save_path = f"models/classifiers/{model_name}_{classifier_type}_classifier.pt"
     
     # Train the classifier with enhanced early stopping
     train_loss_history, val_loss_history, val_accuracy_history = train_classifier(
@@ -182,7 +211,8 @@ def main(args):
         weight_decay=args.weight_decay if hasattr(args, 'weight_decay') else 1e-5,
         patience=args.classifier_patience if hasattr(args, 'classifier_patience') else 5,
         early_stopping_metric=args.early_stopping_metric if hasattr(args, 'early_stopping_metric') else 'loss',
-        save_path=classifier_save_path
+        save_path=classifier_save_path,
+        focal_loss_gamma=args.focal_loss_gamma if hasattr(args, 'focal_loss_gamma') else 2.0
     )
     
     # Log metrics to wandb
