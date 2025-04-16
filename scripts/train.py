@@ -3,6 +3,7 @@ import os
 import transformers
 import matplotlib.pyplot as plt
 import ast
+import gc
 import wandb
 from sklearn.model_selection import train_test_split
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -85,6 +86,8 @@ def main(args):
     print("Successfully loaded dataset.")
 
     train_dataset, val_dataset = train_test_split(dataset, test_size=0.2, random_state=42)
+    dataset = None
+    gc.collect()
 
     print(f"Starting SFT for {args.sft_epochs} epochs...")
     model, train_loss_history, val_loss_history = supervised_fine_tuning(
