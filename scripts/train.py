@@ -31,13 +31,14 @@ def plot_loss(train_loss_history, path: str, val_loss_history=None, title: str =
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train and evaluate trigger-based language model")
-    parser.add_argument("--model", type=str, choices=["gemma-2b-it", "qwen2-1.5B-Instruct", "qwen2-0.5B-Instruct"], help="Model to use")
+    parser.add_argument("--model", type=str, choices=["meta-llama/Llama-4-Scout-17B-16E", "gemma-2b-it", "qwen2-1.5B-Instruct", "qwen2-0.5B-Instruct", "gpt2"], help="Model to use")
     parser.add_argument("--dataset_size", type=int, default=1000, help="Number of samples in the dataset")
     parser.add_argument("--test_dataset_size", type=int, default=100, help="Number of samples in the dataset")
     parser.add_argument("--sft_epochs", type=int, default=10, help="Number of epochs for supervised fine-tuning")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for training")
     parser.add_argument("--dataset_name", type=str, default=None, help="Whether specific dataset is to be used")
+    parser.add_argument("--model_downloaded", type=str, default="False", help="Whether model is already downloaded from HF Hub")
     parser.add_argument("--early_stopping", default=False, action="store_true", help="Whether to use early stopping for SFT")
     return parser.parse_args()
 
@@ -46,23 +47,37 @@ def main(args):
     config = wandb.config
 
     print("Starting the script...")
-    
+
     print(f"Loading model: {args.model}")
-    model = load_model(args.model)
+    model = load_model(args.model, ast.literal_eval(args.model_downloaded))
     wandb.watch(model, log="all")
 
     model.gradient_checkpointing_enable()
     print("Gradient checkpointing enabled.")
 
     print("Loading tokenizer...")
-    tokenizer = load_tokenizer(args.model)
+    tokenizer = load_tokenizer(args.model, ast.literal_eval(args.model_downloaded))
     print("Tokenizer loaded successfully.")
-
-    if (args.model == "gemma-2b-it"):
-        tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}Human: {{ message['content'] }}{% elif message['role'] == 'assistant' %}Assistant: {{ message['content'] }}{% endif %}{% if not loop.last %}\n{% endif %}{% endfor %}"
-
+    
     tokenizer.pad_token = tokenizer.eos_token
     transformers.logging.set_verbosity_error()
+    
+    # print(f"Loading model: {args.model}")
+    # model = load_model(args.model)
+    # wandb.watch(model, log="all")
+
+    # model.gradient_checkpointing_enable()
+    # print("Gradient checkpointing enabled.")
+
+    # print("Loading tokenizer...")
+    # tokenizer = load_tokenizer(args.model)
+    # print("Tokenizer loaded successfully.")
+
+    # if (args.model == "gemma-2b-it"):
+    #     tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}Human: {{ message['content'] }}{% elif message['role'] == 'assistant' %}Assistant: {{ message['content'] }}{% endif %}{% if not loop.last %}\n{% endif %}{% endfor %}"
+
+    # tokenizer.pad_token = tokenizer.eos_token
+    # transformers.logging.set_verbosity_error()
     
     print("Loading Dataset...")
     dataset = load_dataset(f"datasets/{args.dataset_name}_{args.dataset_size}.pkl")
