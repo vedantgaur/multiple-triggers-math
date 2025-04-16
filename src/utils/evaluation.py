@@ -13,7 +13,7 @@ def get_true_trigger(prompt: str) -> str:
     for operation, keywords in triggers.items():
         if any(keyword in prompt_lower for keyword in keywords):
             return operation
-    return "no_operation"
+    # return "no_operation"
 
 def evaluation(model: torch.nn.Module, classifier: torch.nn.Module, tokenizer, test_dataset: List[List[Dict[str, str]]]):
     model.eval()
@@ -22,7 +22,7 @@ def evaluation(model: torch.nn.Module, classifier: torch.nn.Module, tokenizer, t
     total = 0
     results = []
 
-    triggers = ["add", "multiply", "subtract", "divide", "no_operation"]
+    triggers = ["add", "multiply", "subtract", "divide"]
 
     device = next(model.parameters()).device
 
