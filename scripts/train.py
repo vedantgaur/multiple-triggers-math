@@ -31,7 +31,8 @@ def plot_loss(train_loss_history, path: str, val_loss_history=None, title: str =
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train and evaluate trigger-based language model")
-    parser.add_argument("--model", type=str, choices=["meta-llama/Llama-4-Scout-17B-16E", "gemma-2b-it", "qwen2-1.5B-Instruct", "qwen2-0.5B-Instruct", "gpt2"], help="Model to use")
+    # parser.add_argument("--model", type=str, choices=["meta-llama/Llama-4-Scout-17B-16E", "gemma-2b-it", "qwen2-1.5B-Instruct", "qwen2-0.5B-Instruct", "gpt2"], help="Model to use")
+    parser.add_argument("--model", type=str, help="Model to use")
     parser.add_argument("--dataset_size", type=int, default=1000, help="Number of samples in the dataset")
     parser.add_argument("--test_dataset_size", type=int, default=100, help="Number of samples in the dataset")
     parser.add_argument("--sft_epochs", type=int, default=10, help="Number of epochs for supervised fine-tuning")
