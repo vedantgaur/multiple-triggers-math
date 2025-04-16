@@ -42,6 +42,11 @@ def parse_args():
     parser.add_argument("--dataset_name", type=str, default=None, help="Whether specific dataset is to be used")
     parser.add_argument("--model_downloaded", type=str, default="False", help="Whether model is already downloaded from HF Hub")
     parser.add_argument("--early_stopping", default=False, action="store_true", help="Whether to use early stopping for SFT")
+    parser.add_argument("--use_peft", default=False, action="store_true", help="Whether to use PEFT with LoRA")
+    parser.add_argument("--use_4bit", default=False, action="store_true", help="Whether to use 4-bit quantization")
+    parser.add_argument("--use_deepspeed", default=False, action="store_true", help="Whether to use DeepSpeed for training")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Number of gradient accumulation steps")
+    parser.add_argument("--max_length", type=int, default=None, help="Maximum sequence length for training")
     return parser.parse_args()
 
 def main(args):
@@ -98,7 +103,10 @@ def main(args):
         num_epochs=args.sft_epochs, 
         batch_size=args.batch_size, 
         learning_rate=args.learning_rate,
-        early_stopping=args.early_stopping
+        early_stopping=args.early_stopping,
+        use_4bit=args.use_4bit,
+        use_deepspeed=args.use_deepspeed,
+        accumulation_steps=args.gradient_accumulation_steps
     )
     print("Supervised fine-tuning completed.")
 

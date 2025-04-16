@@ -5,3 +5,8 @@ pandas
 matplotlib
 wandb
 scikit-learn
+bitsandbytes
+peft
+deepspeed
+accelerate
+tqdm
