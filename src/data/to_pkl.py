@@ -23,3 +23,4 @@ def json_to_pkl(file_path):
     print(f"JSON file '{file_path}' converted and saved as '{pkl_file_path}'.")
 
 json_to_pkl('datasets/test_math_50.json')
+json_to_pkl('datasets/math_300.json')
