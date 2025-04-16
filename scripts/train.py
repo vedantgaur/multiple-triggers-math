@@ -16,18 +16,30 @@ from src.utils.evaluation import evaluation
 from src.utils.save_results import save_results
 from src.data.load_dataset import load_dataset
 
-def plot_loss(train_loss_history, path: str, val_loss_history=None, title: str = "Loss"):
+def plot_loss(train_loss_history, path: str, val_loss_history=None, val_accuracy_history=None, title: str = "Loss"):
     plt.figure(figsize=(10, 6))
     plt.plot(range(1, len(train_loss_history) + 1), train_loss_history, label='Training Loss', marker='o')
     if val_loss_history is not None:
         plt.plot(range(1, len(val_loss_history) + 1), val_loss_history, label='Validation Loss', marker='s')
-        plt.legend()
+    plt.legend()
     plt.title(title)
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.grid(True)
     plt.savefig(path)
     plt.close()
+    
+    # Create a separate plot for accuracy if available
+    if val_accuracy_history is not None:
+        plt.figure(figsize=(10, 6))
+        plt.plot(range(1, len(val_accuracy_history) + 1), val_accuracy_history, label='Validation Accuracy', marker='d', color='green')
+        plt.legend()
+        plt.title(f"{title.replace('Loss', 'Accuracy')}")
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.grid(True)
+        plt.savefig(path.replace('loss', 'accuracy'))
+        plt.close()
 
 
 def parse_args():
@@ -47,6 +59,20 @@ def parse_args():
     parser.add_argument("--use_deepspeed", default=False, action="store_true", help="Whether to use DeepSpeed for training")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Number of gradient accumulation steps")
     parser.add_argument("--max_length", type=int, default=None, help="Maximum sequence length for training")
+    parser.add_argument("--use_multiple_layers", action="store_true", help="Use multiple layers from transformer for classification")
+    parser.add_argument("--num_layers", type=int, default=4, help="Number of layers to use from transformer if use_multiple_layers is True")
+    parser.add_argument("--hidden_sizes", nargs="+", type=int, default=[256, 128, 64], help="Hidden layer sizes for classifier")
+    parser.add_argument("--dropout_rate", type=float, default=0.3, help="Dropout rate for classifier")
+    parser.add_argument("--classifier_epochs", type=int, default=20, help="Number of epochs for classifier training")
+    parser.add_argument("--classifier_batch_size", type=int, default=32, help="Batch size for classifier training")
+    parser.add_argument("--classifier_lr", type=float, default=1e-4, help="Learning rate for classifier")
+    parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay for classifier optimizer")
+    parser.add_argument("--classifier_patience", type=int, default=5, 
+                      help="Early stopping patience for classifier training")
+    parser.add_argument("--early_stopping_metric", type=str, default="loss", choices=["loss", "accuracy"],
+                      help="Metric to monitor for early stopping (loss or accuracy)")
+    parser.add_argument("--save_best_classifier", action="store_true", 
+                      help="Whether to save the best classifier model during training")
     return parser.parse_args()
 
 def main(args):
@@ -114,15 +140,69 @@ def main(args):
     plot_loss(train_loss_history, val_loss_history=val_loss_history, path=f"results/plots/{args.model}_{args.dataset_size}_sft_loss.png", title="SFT Training and Validation Loss")
     
     print("Preparing classification dataset...")
-    classifier_dataset = prepare_classification_data(model, tokenizer)
-    input_size = classifier_dataset[0][0].shape[0]
+    use_multiple_layers = args.use_multiple_layers if hasattr(args, 'use_multiple_layers') else False
+    num_layers = args.num_layers if hasattr(args, 'num_layers') else 4
+    classifier_dataset = prepare_classification_data(model, tokenizer, use_multiple_layers=use_multiple_layers, num_layers=num_layers)
+    
+    if use_multiple_layers:
+        # For multiple layers, the input size is calculated based on the first item in the dataset
+        input_size = sum(layer.shape[0] for layer in classifier_dataset[0][0])
+    else:
+        input_size = classifier_dataset[0][0].shape[0]
+    
     print(f"Classification dataset prepared. Input size: {input_size}")
 
     print("Initializing and training classifier...")
-    n_classes = 5
-    classifier = TriggerClassifier(input_size, n_classes=n_classes)
-    loss_history = train_classifier(classifier, classifier_dataset)
-    plot_loss(loss_history, path=f"results/plots/{args.model}_{args.dataset_size}_classifier_training_loss.png", title="Classifier Training Loss")
+    n_classes = 5  # 4 operations + no_operation
+    hidden_sizes = args.hidden_sizes if isinstance(args.hidden_sizes, list) else [256, 128, 64]
+    dropout_rate = args.dropout_rate if hasattr(args, 'dropout_rate') else 0.3
+    
+    classifier = TriggerClassifier(
+        input_size, 
+        hidden_sizes=hidden_sizes,
+        dropout_rate=dropout_rate,
+        n_classes=n_classes,
+        use_multiple_layers=use_multiple_layers
+    )
+    
+    # Set up classifier save path if saving is enabled
+    classifier_save_path = None
+    if hasattr(args, 'save_best_classifier') and args.save_best_classifier:
+        model_name = args.model.split('/')[-1] if '/' in args.model else args.model
+        os.makedirs(f"models/classifiers", exist_ok=True)
+        classifier_save_path = f"models/classifiers/{model_name}_classifier.pt"
+    
+    # Train the classifier with enhanced early stopping
+    train_loss_history, val_loss_history, val_accuracy_history = train_classifier(
+        classifier, 
+        classifier_dataset,
+        num_epochs=args.classifier_epochs if hasattr(args, 'classifier_epochs') else 20,
+        batch_size=args.classifier_batch_size if hasattr(args, 'classifier_batch_size') else 32,
+        learning_rate=args.classifier_lr if hasattr(args, 'classifier_lr') else 1e-4,
+        weight_decay=args.weight_decay if hasattr(args, 'weight_decay') else 1e-5,
+        patience=args.classifier_patience if hasattr(args, 'classifier_patience') else 5,
+        early_stopping_metric=args.early_stopping_metric if hasattr(args, 'early_stopping_metric') else 'loss',
+        save_path=classifier_save_path
+    )
+    
+    # Log metrics to wandb
+    wandb.log({
+        "Classifier/Train Loss": train_loss_history,
+        "Classifier/Val Loss": val_loss_history,
+        "Classifier/Val Accuracy": val_accuracy_history,
+        "Classifier/Best Val Loss": min(val_loss_history) if val_loss_history else None,
+        "Classifier/Best Val Accuracy": max(val_accuracy_history) if val_accuracy_history else None
+    })
+    
+    # Plot training results
+    plot_loss(
+        train_loss_history, 
+        val_loss_history=val_loss_history,
+        val_accuracy_history=val_accuracy_history,
+        path=f"results/plots/{args.model}_{args.dataset_size}_classifier_training_loss.png", 
+        title="Classifier Training and Validation Loss"
+    )
+    
     print("Classifier training completed.")
 
     print("Starting evaluation...")
