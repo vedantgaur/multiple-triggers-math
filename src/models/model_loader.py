@@ -38,6 +38,14 @@ def load_tokenizer(model_name, downloaded):
     if downloaded:
         if not os.path.exists(model_path):
             raise ValueError(f"Local tokenizer not found: {model_path}")
-        return AutoTokenizer.from_pretrained(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
     else:
-        return AutoTokenizer.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    # Add chat template based on model type
+    if "meta-llama" in model_name.lower() or "llama" in model_name.lower():
+        tokenizer.chat_template = "<s>{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}"
+    elif "gemma" in model_name.lower():
+        tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'user' %}Human: {{ message['content'] }}{% elif message['role'] == 'assistant' %}Assistant: {{ message['content'] }}{% endif %}{% if not loop.last %}\n{% endif %}{% endfor %}"
+    
+    return tokenizer
