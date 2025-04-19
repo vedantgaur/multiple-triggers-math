@@ -9,9 +9,11 @@ from sklearn.model_selection import train_test_split
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
+import torch
 from src.models.model_loader import load_model, load_tokenizer
 from src.training.sft import supervised_fine_tuning
 from src.models.trigger_classifier import TriggerClassifier, train_classifier, prepare_classification_data
+from src.models.linear_classifier import LinearTriggerClassifier, train_linear_classifier, get_hidden_states_for_linear
 from src.utils.evaluation import evaluation
 from src.utils.save_results import save_results
 from src.data.load_dataset import load_dataset
@@ -74,8 +76,8 @@ def parse_args():
     parser.add_argument("--save_best_classifier", action="store_true", 
                       help="Whether to save the best classifier model during training")
     parser.add_argument("--classifier_type", type=str, default="mlp", 
-                      choices=["mlp", "transformer", "residual"],
-                      help="Type of classifier architecture to use (mlp, transformer, residual)")
+                      choices=["mlp", "transformer", "residual", "linear"],
+                      help="Type of classifier architecture to use (mlp, transformer, residual, linear)")
     parser.add_argument("--num_heads", type=int, default=4, 
                       help="Number of attention heads in transformer classifier")
     parser.add_argument("--num_transformer_layers", type=int, default=2, 
@@ -86,6 +88,15 @@ def parse_args():
                       help="Gamma parameter for focal loss (0 to disable)")
     parser.add_argument("--balance_classes", action="store_true",
                       help="Whether to balance classes in dataset generation")
+    
+    # Linear classifier specific arguments
+    parser.add_argument("--regularization", type=str, default="l2", choices=['none', 'l1', 'l2'], 
+                      help="Regularization type for linear classifier")
+    parser.add_argument("--reg_weight", type=float, default=0.01, 
+                      help="Weight for regularization term in linear classifier")
+    parser.add_argument("--calibrated", action="store_true", 
+                      help="Whether to use probability calibration for linear classifier")
+    
     return parser.parse_args()
 
 def main(args):
@@ -157,19 +168,29 @@ def main(args):
     num_layers = args.num_layers if hasattr(args, 'num_layers') else 4
     balance_classes = args.balance_classes if hasattr(args, 'balance_classes') else True
     
-    classifier_dataset = prepare_classification_data(
-        model, 
-        tokenizer, 
-        use_multiple_layers=use_multiple_layers, 
-        num_layers=num_layers,
-        balance_classes=balance_classes
-    )
-    
-    if use_multiple_layers:
-        # For multiple layers, the input size is calculated based on the first item in the dataset
-        input_size = sum(layer.shape[0] for layer in classifier_dataset[0][0])
-    else:
+    # Choose the right dataset preparation function based on classifier type
+    if args.classifier_type == "linear":
+        classifier_dataset = prepare_classification_data(
+            model, 
+            tokenizer, 
+            use_multiple_layers=False,  # Linear classifier doesn't need multiple layers
+            balance_classes=balance_classes
+        )
         input_size = classifier_dataset[0][0].shape[0]
+    else:
+        classifier_dataset = prepare_classification_data(
+            model, 
+            tokenizer, 
+            use_multiple_layers=use_multiple_layers, 
+            num_layers=num_layers,
+            balance_classes=balance_classes
+        )
+        
+        if use_multiple_layers:
+            # For multiple layers, the input size is calculated based on the first item in the dataset
+            input_size = sum(layer.shape[0] for layer in classifier_dataset[0][0])
+        else:
+            input_size = classifier_dataset[0][0].shape[0]
     
     print(f"Classification dataset prepared. Input size: {input_size}")
 
@@ -182,38 +203,72 @@ def main(args):
     
     print(f"Using classifier type: {classifier_type}")
     
-    classifier = TriggerClassifier(
-        input_size, 
-        hidden_sizes=hidden_sizes,
-        dropout_rate=dropout_rate,
-        n_classes=n_classes,
-        use_multiple_layers=use_multiple_layers,
-        temperature=temperature,
-        classifier_type=classifier_type,
-        num_heads=args.num_heads if hasattr(args, 'num_heads') else 4,
-        num_transformer_layers=args.num_transformer_layers if hasattr(args, 'num_transformer_layers') else 2
-    )
-    
-    # Set up classifier save path if saving is enabled
+    # Set up classifier save path
+    model_name = args.model.split('/')[-1] if '/' in args.model else args.model
     classifier_save_path = None
     if hasattr(args, 'save_best_classifier') and args.save_best_classifier:
-        model_name = args.model.split('/')[-1] if '/' in args.model else args.model
         os.makedirs(f"models/classifiers", exist_ok=True)
         classifier_save_path = f"models/classifiers/{model_name}_{classifier_type}_classifier.pt"
     
-    # Train the classifier with enhanced early stopping
-    train_loss_history, val_loss_history, val_accuracy_history = train_classifier(
-        classifier, 
-        classifier_dataset,
-        num_epochs=args.classifier_epochs if hasattr(args, 'classifier_epochs') else 20,
-        batch_size=args.classifier_batch_size if hasattr(args, 'classifier_batch_size') else 32,
-        learning_rate=args.classifier_lr if hasattr(args, 'classifier_lr') else 1e-4,
-        weight_decay=args.weight_decay if hasattr(args, 'weight_decay') else 1e-5,
-        patience=args.classifier_patience if hasattr(args, 'classifier_patience') else 5,
-        early_stopping_metric=args.early_stopping_metric if hasattr(args, 'early_stopping_metric') else 'loss',
-        save_path=classifier_save_path,
-        focal_loss_gamma=args.focal_loss_gamma if hasattr(args, 'focal_loss_gamma') else 2.0
-    )
+    # Initialize the appropriate classifier based on type
+    if classifier_type == "linear":
+        # Linear classifier
+        regularization = args.regularization if hasattr(args, 'regularization') else 'l2'
+        if regularization == 'none':
+            regularization = None
+        
+        classifier = LinearTriggerClassifier(
+            input_size=input_size,
+            n_classes=n_classes,
+            regularization=regularization,
+            calibrated=args.calibrated if hasattr(args, 'calibrated') else False,
+            temperature=temperature
+        )
+        
+        # Train the linear classifier
+        print(f"Training linear classifier...")
+        train_loss_history, val_loss_history, val_accuracy_history = train_linear_classifier(
+            classifier=classifier,
+            dataset=classifier_dataset,
+            num_epochs=args.classifier_epochs if hasattr(args, 'classifier_epochs') else 15,
+            batch_size=args.classifier_batch_size if hasattr(args, 'classifier_batch_size') else 32,
+            learning_rate=args.classifier_lr if hasattr(args, 'classifier_lr') else 1e-3,
+            weight_decay=args.weight_decay if hasattr(args, 'weight_decay') else 1e-4,
+            reg_weight=args.reg_weight if hasattr(args, 'reg_weight') else 0.01,
+            use_balanced_sampler=balance_classes
+        )
+        
+        # Save model if requested
+        if classifier_save_path:
+            torch.save(classifier.state_dict(), classifier_save_path)
+            print(f"Linear classifier saved to {classifier_save_path}")
+    else:
+        # Neural network classifier (MLP, Transformer, Residual)
+        classifier = TriggerClassifier(
+            input_size, 
+            hidden_sizes=hidden_sizes,
+            dropout_rate=dropout_rate,
+            n_classes=n_classes,
+            use_multiple_layers=use_multiple_layers,
+            temperature=temperature,
+            classifier_type=classifier_type,
+            num_heads=args.num_heads if hasattr(args, 'num_heads') else 4,
+            num_transformer_layers=args.num_transformer_layers if hasattr(args, 'num_transformer_layers') else 2
+        )
+        
+        # Train the neural network classifier
+        train_loss_history, val_loss_history, val_accuracy_history = train_classifier(
+            classifier, 
+            classifier_dataset,
+            num_epochs=args.classifier_epochs if hasattr(args, 'classifier_epochs') else 20,
+            batch_size=args.classifier_batch_size if hasattr(args, 'classifier_batch_size') else 32,
+            learning_rate=args.classifier_lr if hasattr(args, 'classifier_lr') else 1e-4,
+            weight_decay=args.weight_decay if hasattr(args, 'weight_decay') else 1e-5,
+            patience=args.classifier_patience if hasattr(args, 'classifier_patience') else 5,
+            early_stopping_metric=args.early_stopping_metric if hasattr(args, 'early_stopping_metric') else 'loss',
+            save_path=classifier_save_path,
+            focal_loss_gamma=args.focal_loss_gamma if hasattr(args, 'focal_loss_gamma') else 2.0
+        )
     
     # Log metrics to wandb
     wandb.log({
@@ -229,8 +284,8 @@ def main(args):
         train_loss_history, 
         val_loss_history=val_loss_history,
         val_accuracy_history=val_accuracy_history,
-        path=f"results/plots/{args.model}_{args.dataset_size}_classifier_training_loss.png", 
-        title="Classifier Training and Validation Loss"
+        path=f"results/plots/{args.model}_{args.dataset_size}_{classifier_type}_classifier_training_loss.png", 
+        title=f"{classifier_type.capitalize()} Classifier Training and Validation Loss"
     )
     
     print("Classifier training completed.")
