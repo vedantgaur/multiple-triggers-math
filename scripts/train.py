@@ -253,33 +253,28 @@ def main_worker(args, rank=0, world_size=1):
     if is_distributed:
         dist.barrier()
 
-    # When running distributed training, handle HF login differently
-    # Only the main process should handle the interactive login
-    if is_distributed:
-        if is_main_process:
-            print(f"Rank {rank}: Loading model: {args.model}")
-            # Main process loads the model (which may trigger HF login)
-            model = load_model(args.model, eval(args.model_downloaded))
-            print(f"Rank {rank}: Model loaded successfully on main process")
-            
-            # Signal to other processes that auth is complete
-            auth_complete = torch.tensor([1], device=f"cuda:{rank}")
-        else:
-            # Other processes wait for auth signal
-            auth_complete = torch.tensor([0], device=f"cuda:{rank}")
-        
-        # Broadcast the auth status from rank 0 to all processes
-        dist.broadcast(auth_complete, 0)
-        
-        # Make sure other processes only continue after auth is complete
-        if not is_main_process:
-            # Now it's safe to load the model on other processes
-            print(f"Rank {rank}: Loading model: {args.model}")
-            model = load_model(args.model, eval(args.model_downloaded))
-    else:
-        # Non-distributed: load normally
+    # HF authentication should be handled in model_loader.py before loading the model
+    try:
         print(f"Rank {rank}: Loading model: {args.model}")
         model = load_model(args.model, eval(args.model_downloaded))
+        print(f"Rank {rank}: Model loaded successfully")
+    except Exception as e:
+        print(f"Rank {rank}: Error loading model: {e}")
+        # If there's a problem with model loading, synchronize with other processes
+        if is_distributed:
+            # Signal that this process failed loading
+            failure = torch.tensor([1], device=f"cuda:{rank}")
+            # All processes need to participate in collective operations
+            dist.all_reduce(failure)
+            # Clean up and exit
+            if dist.is_initialized():
+                dist.destroy_process_group()
+            raise e
+    
+    # Ensure all processes are synchronized after model loading
+    if is_distributed:
+        # Make sure all processes have loaded the model before continuing
+        dist.barrier()
     
     if is_main_process and args.use_wandb:
         try:

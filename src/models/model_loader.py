@@ -54,7 +54,7 @@ def load_tokenizer(model_name, model_downloaded=False):
 
 def ensure_auth_token():
     """Ensure HuggingFace auth token is set"""
-    global _HF_LOGIN_COMPLETED
+    global _HF_LOGIN_COMPLETED, _HF_TOKEN
     
     if _HF_LOGIN_COMPLETED:
         return
@@ -136,26 +136,53 @@ def load_model(model_name, model_downloaded=False, load_in_8bit=False, device_ma
                 model = AutoModelForCausalLM.from_pretrained(path, device_map=device_map)
         else:
             print(f"Loading model {model_name} from HuggingFace...")
-            # Use multiple options for loading to handle different models
+            # Common loading options for all attempts
+            loading_options = {
+                "quantization_config": quantization_config if load_in_8bit else None,
+                "device_map": device_map,
+                "token": _HF_TOKEN,
+                "trust_remote_code": True,
+                "offload_folder": "offload",
+                "low_cpu_mem_usage": True,
+                "cache_dir": os.path.expanduser("~/.cache/huggingface/hub")
+            }
+            
+            # Try different loading methods in sequence
             try:
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    quantization_config=quantization_config if load_in_8bit else None,
-                    device_map=device_map,
-                    token=_HF_TOKEN,
-                    trust_remote_code=True
-                )
+                print("Attempting to load model with token...")
+                model = AutoModelForCausalLM.from_pretrained(model_name, **loading_options)
             except OSError as e:
                 print(f"Initial loading failed: {e}")
-                print("Trying with additional options...")
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    quantization_config=quantization_config if load_in_8bit else None,
-                    device_map=device_map,
-                    token=_HF_TOKEN,
-                    use_auth_token=_HF_TOKEN,
-                    trust_remote_code=True
-                )
+                
+                # Try with use_auth_token
+                try:
+                    print("Trying with use_auth_token...")
+                    loading_options["use_auth_token"] = _HF_TOKEN
+                    model = AutoModelForCausalLM.from_pretrained(model_name, **loading_options)
+                except Exception as e2:
+                    print(f"Second attempt failed: {e2}")
+                    
+                    # Try with explicit token path
+                    try:
+                        # If model is llama-2, try using meta-llama endpoint which may be better supported
+                        if "llama-2" in model_name.lower() and not model_name.startswith("meta-llama/"):
+                            adjusted_model_name = f"meta-llama/{model_name.split('/')[-1]}"
+                            print(f"Trying with adjusted model name: {adjusted_model_name}")
+                            model = AutoModelForCausalLM.from_pretrained(adjusted_model_name, **loading_options)
+                        else:
+                            # Try forcing token in huggingface hub lib
+                            from huggingface_hub import snapshot_download
+                            print("Attempting to download model snapshot directly...")
+                            model_path = snapshot_download(
+                                repo_id=model_name,
+                                token=_HF_TOKEN,
+                                local_files_only=False
+                            )
+                            print(f"Model downloaded to {model_path}, loading from disk...")
+                            model = AutoModelForCausalLM.from_pretrained(model_path, **loading_options)
+                    except Exception as e3:
+                        print(f"All loading attempts failed. Last error: {e3}")
+                        raise ValueError(f"Failed to load model {model_name} after multiple attempts")
             
         if hasattr(model, 'gradient_checkpointing_enable'):
             model.gradient_checkpointing_enable()
@@ -174,5 +201,15 @@ def load_model(model_name, model_downloaded=False, load_in_8bit=False, device_ma
             print(f"Current process rank: {local_rank}")
             print(f"Current HF token status: {'Set' if _HF_TOKEN else 'Not set'}")
             print(f"Login completed: {_HF_LOGIN_COMPLETED}")
+            
+            # Try to list model files to see what's available
+            try:
+                from huggingface_hub import list_repo_files
+                files = list_repo_files(model_name, token=_HF_TOKEN)
+                print(f"Available files in the repo:")
+                for f in files:
+                    print(f"  {f}")
+            except Exception as file_e:
+                print(f"Could not list repo files: {file_e}")
         
         raise e
