@@ -118,6 +118,42 @@ class DataCollatorForSupervisedDataset:
             "attention_mask": attention_mask,
         }
 
+def collate_fn(batch, tokenizer, max_length=None):
+    """
+    Custom collate function to tokenize and pad the batch.
+    
+    Args:
+        batch: List of conversations
+        tokenizer: The tokenizer to use
+        max_length: Maximum sequence length
+        
+    Returns:
+        batch_encoding: The tokenized and padded batch
+    """
+    messages = []
+    for conversation in batch:
+        messages.append(conversation)
+    
+    # Apply chat template
+    messages_tokenized = [tokenizer.apply_chat_template(msg, return_tensors="pt") for msg in messages]
+    
+    # Pad batch
+    if max_length is None:
+        max_length = max(msg.size(1) for msg in messages_tokenized)
+    
+    padded_messages = []
+    for msg in messages_tokenized:
+        if msg.size(1) < max_length:
+            padding = torch.full((1, max_length - msg.size(1)), tokenizer.pad_token_id, dtype=torch.long)
+            padded_msg = torch.cat([msg, padding], dim=1)
+        else:
+            padded_msg = msg[:, :max_length]
+        padded_messages.append(padded_msg)
+    
+    batch_encoding = torch.cat(padded_messages, dim=0)
+    
+    return batch_encoding
+
 def supervised_fine_tuning(model, tokenizer, train_dataset, val_dataset, num_epochs=10, batch_size=4, 
                           learning_rate=1e-5, early_stopping=False, use_4bit=False, use_deepspeed=False, 
                           accumulation_steps=1, max_length=None, train_sampler=None, val_sampler=None,
@@ -155,6 +191,12 @@ def supervised_fine_tuning(model, tokenizer, train_dataset, val_dataset, num_epo
     
     is_main_process = rank == 0
     is_distributed = world_size > 1
+    
+    # In distributed mode, make sure model knows its device explicitly
+    if is_distributed:
+        # Ensure the model is on the correct device
+        print(f"Rank {rank}: Ensuring model is on device {device}")
+        model = model.to(device)
     
     # Prepare data loaders with appropriate samplers
     if train_sampler is not None:
@@ -228,10 +270,36 @@ def supervised_fine_tuning(model, tokenizer, train_dataset, val_dataset, num_epo
             train_iter = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
         
         for step, batch in enumerate(train_iter):
+            # Move batch to device carefully - ensure all tensors are on the right device
+            if isinstance(batch, torch.Tensor):
+                inputs = batch.to(device, non_blocking=True)
+            else:
+                # Handle dictionary case
+                inputs = {k: v.to(device, non_blocking=True) for k, v in batch.items()} if isinstance(batch, dict) else batch.to(device, non_blocking=True)
+            
+            # Double-check model's placement
+            for name, param in model.named_parameters():
+                if param.device != device:
+                    if is_main_process:
+                        print(f"Warning: Parameter {name} is on {param.device}, should be on {device}")
+                    # Move it to the correct device
+                    param.data = param.data.to(device)
+            
             # Forward pass
-            inputs = batch.to(device)
-            outputs = model(inputs, labels=inputs)
-            loss = outputs.loss / accumulation_steps  # Normalize loss for gradient accumulation
+            try:
+                outputs = model(inputs, labels=inputs)
+                loss = outputs.loss / accumulation_steps  # Normalize loss for gradient accumulation
+            except RuntimeError as e:
+                # If there's a device mismatch error, print detailed information
+                if "Expected all tensors to be on the same device" in str(e):
+                    if is_main_process:
+                        print(f"Device mismatch at step {step}. Details:")
+                        print(f"  Input device: {inputs.device if isinstance(inputs, torch.Tensor) else 'dict'}")
+                        for name, param in model.named_parameters():
+                            print(f"  Parameter {name} device: {param.device}")
+                    raise
+                else:
+                    raise
             
             # Backward pass
             loss.backward()
@@ -267,7 +335,13 @@ def supervised_fine_tuning(model, tokenizer, train_dataset, val_dataset, num_epo
         
         with torch.no_grad():
             for batch in val_loader:
-                inputs = batch.to(device)
+                # Move batch to device
+                if isinstance(batch, torch.Tensor):
+                    inputs = batch.to(device, non_blocking=True) 
+                else:
+                    # Handle dictionary case
+                    inputs = {k: v.to(device, non_blocking=True) for k, v in batch.items()} if isinstance(batch, dict) else batch.to(device, non_blocking=True)
+                
                 outputs = model(inputs, labels=inputs)
                 loss = outputs.loss
                 
@@ -303,39 +377,3 @@ def supervised_fine_tuning(model, tokenizer, train_dataset, val_dataset, num_epo
         model.train()
     
     return model, train_loss_history, val_loss_history
-
-def collate_fn(batch, tokenizer, max_length=None):
-    """
-    Custom collate function to tokenize and pad the batch.
-    
-    Args:
-        batch: List of conversations
-        tokenizer: The tokenizer to use
-        max_length: Maximum sequence length
-        
-    Returns:
-        batch_encoding: The tokenized and padded batch
-    """
-    messages = []
-    for conversation in batch:
-        messages.append(conversation)
-    
-    # Apply chat template
-    messages_tokenized = [tokenizer.apply_chat_template(msg, return_tensors="pt") for msg in messages]
-    
-    # Pad batch
-    if max_length is None:
-        max_length = max(msg.size(1) for msg in messages_tokenized)
-    
-    padded_messages = []
-    for msg in messages_tokenized:
-        if msg.size(1) < max_length:
-            padding = torch.full((1, max_length - msg.size(1)), tokenizer.pad_token_id, dtype=torch.long)
-            padded_msg = torch.cat([msg, padding], dim=1)
-        else:
-            padded_msg = msg[:, :max_length]
-        padded_messages.append(padded_msg)
-    
-    batch_encoding = torch.cat(padded_messages, dim=0)
-    
-    return batch_encoding
