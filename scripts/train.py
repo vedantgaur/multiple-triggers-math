@@ -29,10 +29,7 @@ from src.utils.save_results import save_results
 from src.data.load_dataset import load_dataset
 from src.data.dataset_generator import generate_and_save_datasets
 from src.data.math_dataset import MathDataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import json
 from tqdm import tqdm
-from transformers import get_scheduler
 
 def safe_path(model_name):
     """Convert a model name to a safe file path by replacing slashes and other unsafe characters"""
@@ -123,518 +120,454 @@ def get_classifier_config(classifier_type):
     return configs.get(classifier_type, configs["mlp"])
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train a model on a dataset.")
-    parser.add_argument(
-        "--base_model", type=str, default="EleutherAI/pythia-1.4b-deduped",
-        help="Name or path of the base model to use."
-    )
-    parser.add_argument(
-        "--train_path", type=str, default=None, help="Path to the training dataset."
-    )
-    parser.add_argument(
-        "--validation_path", type=str, default=None,
-        help="Path to the validation dataset."
-    )
-    parser.add_argument(
-        "--output_dir", type=str, default="./models",
-        help="Diectory to save the trained model."
-    )
-    parser.add_argument(
-        "--num_train_epochs", type=int, default=1,
-        help="Number of training epochs."
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42, help="Random seed for reproducibility."
-    )
-    parser.add_argument(
-        "--eval_steps", type=int, default=500,
-        help="Number of update steps between evaluations."
-    )
-    parser.add_argument(
-        "--learning_rate", type=float, default=2e-5,
-        help="Learning rate for the training."
-    )
-    parser.add_argument(
-        "--batch_size", type=int, default=1, help="Batch size for training."
-    )
-    parser.add_argument(
-        "--gradient_accumulation_steps", type=int, default=16,
-        help="Number of gradient accumulation steps."
-    )
-    parser.add_argument(
-        "--lr_scheduler_type", type=str, default="linear",
-        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
-        help="Type of learning rate scheduler to use."
-    )
-    parser.add_argument(
-        "--warmup_ratio", type=float, default=0.03,
-        help="Ratio of warmup steps to total steps."
-    )
-    parser.add_argument(
-        "--weight_decay", type=float, default=0.0,
-        help="Weight decay for the AdamW optimizer."
-    )
-    parser.add_argument(
-        "--gradient_checkpointing", type=ast.literal_eval, default=True,
-        help="Whether to use gradient checkpointing to save memory."
-    )
-    parser.add_argument(
-        "--save_steps", type=int, default=500,
-        help="Number of steps between saving model checkpoints."
-    )
-    parser.add_argument(
-        "--logging_steps", type=int, default=10,
-        help="Number of steps between logging training metrics."
-    )
-    parser.add_argument(
-        "--save_total_limit", type=int, default=3,
-        help="Maximum number of model checkpoints to save."
-    )
-    parser.add_argument(
-        "--bf16", type=ast.literal_eval, default=True,
-        help="Whether to use bfloat16 precision."
-    )
-    parser.add_argument(
-        "--optim", type=str, default="adamw_torch",
-        help="Optimizer to use for training."
-    )
-    parser.add_argument(
-        "--adam_beta1", type=float, default=0.9,
-        help="Beta1 for the AdamW optimizer."
-    )
-    parser.add_argument(
-        "--adam_beta2", type=float, default=0.999,
-        help="Beta2 for the AdamW optimizer."
-    )
-    parser.add_argument(
-        "--adam_epsilon", type=float, default=1e-8,
-        help="Epsilon for the AdamW optimizer."
-    )
-    parser.add_argument(
-        "--max_grad_norm", type=float, default=1.0,
-        help="Maximum gradient norm for gradient clipping."
-    )
-    parser.add_argument(
-        "--save_after_n_steps", type=int, default=None,
-        help="Save model after n steps. If None, save after each epoch."
-    )
-    parser.add_argument(
-        "--max_steps", type=int, default=-1,
-        help="Maximum number of training steps. Default is -1, which means train for the specified number of epochs."
-    )
-    parser.add_argument(
-        "--save_after_epoch", type=ast.literal_eval, default=False,
-        help="Save model after each epoch."
-    )
-    parser.add_argument(
-        "--early_stopping", type=ast.literal_eval, default=False,
-        help="Whether to use early stopping."
-    )
-    parser.add_argument(
-        "--early_stopping_patience", type=int, default=3,
-        help="Number of evaluations with no improvement before stopping."
-    )
-    parser.add_argument(
-        "--early_stopping_threshold", type=float, default=0.0,
-        help="Minimum change in validation loss to be considered an improvement."
-    )
-    parser.add_argument(
-        "--use_wandb", type=ast.literal_eval, default=False,
-        help="Whether to use wandb for logging."
-    )
-    parser.add_argument(
-        "--wandb_project", type=str, default="trigger-steerability",
-        help="Project name for wandb."
-    )
-    parser.add_argument(
-        "--wandb_run_name", type=str, default=None,
-        help="Run name for wandb."
-    )
-    parser.add_argument(
-        "--wandb_watch", type=str, default="all",
-        help="Watch mode for wandb."
-    )
-    parser.add_argument(
-        "--wandb_log_model", type=str, default=None,
-        help="Log model to wandb."
-    )
-    parser.add_argument(
-        "--debug_mode", type=ast.literal_eval, default=False,
-        help="Whether to run in debug mode."
-    )
-    parser.add_argument(
-        "--tokenized_dataset", type=ast.literal_eval, default=False,
-        help="Whether the dataset is already tokenized."
-    )
-    parser.add_argument(
-        "--resize_embeddings", type=ast.literal_eval, default=False,
-        help="Whether to resize the model embeddings."
-    )
-    parser.add_argument(
-        "--max_length", type=int, default=256,
-        help="Maximum sequence length for tokenization."
-    )
-    parser.add_argument(
-        "--compute_metrics", type=ast.literal_eval, default=False,
-        help="Whether to compute metrics during training."
-    )
-    parser.add_argument(
-        "--patience", type=int, default=None,
-        help="Patience for early stopping."
-    )
-    parser.add_argument(
-        "--use_resampling", type=ast.literal_eval, default=False,
-        help="Whether to use resampling for imbalanced datasets."
-    )
-    parser.add_argument(
-        "--include_tokens_per_second", type=ast.literal_eval, default=False,
-        help="Whether to include tokens per second in training metrics."
-    )
-    parser.add_argument(
-        "--full_finetune", type=ast.literal_eval, default=False,
-        help="Finetune all model parameters rather than just adapters."
-    )
-    parser.add_argument(
-        "--use_peft", type=ast.literal_eval, default=False,
-        help="Whether to use PEFT for parameter-efficient fine-tuning."
-    )
-    parser.add_argument(
-        "--peft_lora_r", type=int, default=16,
-        help="LoRA r parameter."
-    )
-    parser.add_argument(
-        "--peft_lora_alpha", type=int, default=32,
-        help="LoRA alpha parameter."
-    )
-    parser.add_argument(
-        "--peft_lora_dropout", type=float, default=0.05,
-        help="LoRA dropout parameter."
-    )
-    parser.add_argument(
-        "--peft_task_type", type=str, default="CAUSAL_LM",
-        help="PEFT task type."
-    )
-    parser.add_argument(
-        "--peft_target_modules", type=str, default="auto",
-        help="PEFT target modules."
-    )
-    parser.add_argument(
-        "--use_balanced_batch", type=ast.literal_eval, default=False,
-        help="Whether to use balanced batch sampling."
-    )
-    parser.add_argument(
-        "--do_train", type=ast.literal_eval, default=True,
-        help="Whether to train the model."
-    )
-    parser.add_argument(
-        "--do_eval", type=ast.literal_eval, default=True,
-        help="Whether to evaluate the model."
-    )
-    # Distributed training parameters
-    parser.add_argument(
-        "--distributed", type=ast.literal_eval, default=False,
-        help="Whether to use distributed training."
-    )
-    parser.add_argument(
-        "--world_size", type=int, default=1,
-        help="Number of processes for distributed training."
-    )
-    parser.add_argument(
-        "--local_rank", type=int, default=-1,
-        help="Local rank for distributed training."
-    )
-    parser.add_argument(
-        "--dist_backend", type=str, default="nccl",
-        help="Distributed backend to use."
-    )
-    parser.add_argument(
-        "--dist_url", type=str, default="env://",
-        help="URL used to set up distributed training."
-    )
-    
-    args = parser.parse_args()
-    return args
+    parser = argparse.ArgumentParser(description="Train and evaluate trigger-based language model")
+    parser.add_argument("--model", type=str, required=True, help="Model to use")
+    parser.add_argument("--dataset_size", type=int, default=300, help="Number of samples in the training dataset")
+    parser.add_argument("--test_dataset_size", type=int, default=50, help="Number of samples in the test dataset")
+    parser.add_argument("--sft_epochs", type=int, default=10, help="Number of epochs for supervised fine-tuning")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training")
+    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for training")
+    parser.add_argument("--dataset_name", type=str, default="math", help="Dataset name")
+    parser.add_argument("--generate_dataset", action="store_true", help="Whether to generate a new dataset")
+    parser.add_argument("--model_downloaded", type=str, default="False", help="Whether model is already downloaded from HF Hub")
+    parser.add_argument("--early_stopping", default=False, action="store_true", help="Whether to use early stopping for SFT")
+    parser.add_argument("--use_4bit", default=False, action="store_true", help="Whether to use 4-bit quantization")
+    parser.add_argument("--use_deepspeed", default=False, action="store_true", help="Whether to use DeepSpeed for training")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Number of gradient accumulation steps")
+    parser.add_argument("--classifier_type", type=str, default="mlp", 
+                      choices=["mlp", "transformer", "residual", "linear"],
+                      help="Type of classifier architecture to use")
+    parser.add_argument("--save_best_classifier", action="store_true", 
+                      help="Whether to save the best classifier model during training")
+    parser.add_argument("--balance_classes", action="store_true",
+                      help="Whether to balance classes in dataset generation")
+    parser.add_argument("--multi_gpu", action="store_true", help="Whether to use multiple GPUs for training")
+    parser.add_argument("--num_gpus", type=int, default=-1, help="Number of GPUs to use (-1 for all available)")
+    parser.add_argument("--distributed", action="store_true", help="Whether to use distributed training")
+    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
+    parser.add_argument("--master_port", type=str, default="12355", help="Port for distributed training")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--num_workers", type=int, default=2, help="Number of workers for data loading")
+    return parser.parse_args()
 
-def setup_distributed(rank, world_size, dist_url):
-    """Set up distributed training"""
+def setup_distributed(rank, world_size, port):
+    """Initialize distributed training"""
     try:
-        if torch.cuda.is_available():
-            # Set the device for this process
-            torch.cuda.set_device(rank)
-            
-            # Initialize process group
-            dist.init_process_group(
-                backend="nccl",
-                init_method=dist_url,
-                world_size=world_size,
-                rank=rank
-            )
-            print(f"Rank {rank}: Initialized process group with NCCL backend")
-            return True
-        else:
-            print(f"Rank {rank}: CUDA not available, cannot setup distributed training")
-            return False
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = port
+        
+        # Initialize the process group
+        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+        
+        # Set device for this process
+        torch.cuda.set_device(rank)
+        print(f"Rank {rank}: Distributed setup successful")
+        return True
     except Exception as e:
-        print(f"Rank {rank}: Failed to initialize distributed process: {e}")
+        print(f"Rank {rank}: Distributed setup failed with error: {e}")
         return False
 
 def cleanup_distributed():
-    """Clean up distributed training resources"""
-    if dist.is_initialized():
-        dist.destroy_process_group()
-        print("Destroyed process group")
+    """Clean up distributed training"""
+    try:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+            print("Distributed training cleaned up successfully")
+    except Exception as e:
+        print(f"Error during distributed cleanup: {e}")
 
-def train_distributed(args):
-    """
-    Setup distributed training across multiple GPUs.
-    
-    Args:
-        args: command line arguments
-    """
-    # setup distributed training environment
-    if args.local_rank == -1:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        torch.cuda.set_device(args.local_rank)
-        device = torch.device("cuda", args.local_rank)
-        dist.init_process_group(backend="nccl")
-    
-    # set seeds for reproducibility
+def train_distributed(rank, world_size, args):
+    """Training function for distributed training"""
+    # Set seed for reproducibility
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     
-    # determine if this is the master process
-    is_master = args.local_rank == 0 or args.local_rank == -1
+    # Set up distributed process
+    if not setup_distributed(rank, world_size, args.master_port):
+        print(f"Rank {rank}: Failed to set up distributed training. Exiting.")
+        return
     
-    # initialize wandb on master process only
-    if is_master and args.use_wandb:
-        wandb.init(project="multiple-trigger-math", name=args.run_name, config=vars(args))
-    
-    # load model and tokenizer
-    tokenizer = load_tokenizer(args.model_name)
-    model = load_model(args.model_name, device=device)
-    
-    # wrap model with DDP if using distributed training
-    if args.local_rank != -1:
-        model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank)
-    
-    # load dataset
-    train_dataset, validation_dataset, test_dataset = load_dataset(
-        data_path=args.data_path,
-        tokenizer=tokenizer,
-        max_length=args.max_length,
-        add_trigger_to_clean=args.add_trigger_to_clean,
-        trigger_prompts=args.triggers,
-        trigger_positions=args.trigger_positions,
-        trigger_sequences=args.trigger_sequences,
-        base_prompts_path=args.base_prompts
-    )
-    
-    # Create MathDataset instances
-    train_math_dataset = MathDataset(train_dataset, tokenizer)
-    valid_math_dataset = MathDataset(validation_dataset, tokenizer)
-    
-    # Create distributed samplers
-    train_sampler = DistributedSampler(train_math_dataset) if args.local_rank != -1 else None
-    valid_sampler = DistributedSampler(valid_math_dataset, shuffle=False) if args.local_rank != -1 else None
-    
-    # Create data loaders
-    train_dataloader = DataLoader(
-        train_math_dataset, 
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        shuffle=(train_sampler is None),
-        num_workers=args.num_workers,
-        pin_memory=True
-    )
-    
-    valid_dataloader = DataLoader(
-        valid_math_dataset, 
-        batch_size=args.batch_size,
-        sampler=valid_sampler,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True
-    )
-    
-    # perform supervised fine-tuning
     try:
-        training_stats = supervised_fine_tuning(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataloader=train_dataloader,
-            validation_dataloader=valid_dataloader,
-            num_epochs=args.num_epochs,
-            lr=args.learning_rate,
-            weight_decay=args.weight_decay,
-            warmup_steps=args.warmup_steps,
-            device=device,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            use_wandb=args.use_wandb and is_master,
-            fp16=args.fp16,
-            log_interval=args.log_interval,
-            max_grad_norm=args.max_grad_norm
+        # Only the master process should log to wandb
+        if rank == 0:
+            wandb.init(project="trigger-based-language-model", config=vars(args))
+            
+        # The rest of the training process
+        main_worker(args, rank, world_size)
+        
+    except Exception as e:
+        print(f"Rank {rank}: Error during training: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Clean up distributed process
+        cleanup_distributed()
+
+def main_worker(args, rank=0, world_size=1):
+    """Main training function that can be used for both single and multi-GPU training"""
+    is_distributed = world_size > 1
+    is_main_process = rank == 0
+    
+    # Set seed for reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    
+    if is_main_process:
+        print("Starting the script...")
+        
+        # Generate datasets if requested or if they don't exist
+        if args.generate_dataset or not os.path.exists(f"datasets/{args.dataset_name}_{args.dataset_size}.pkl") or not os.path.exists(f"datasets/test_{args.dataset_name}_{args.test_dataset_size}.pkl"):
+            print(f"Generating new datasets: {args.dataset_name}_{args.dataset_size} and test_{args.dataset_name}_{args.test_dataset_size}")
+            train_path, test_path = generate_and_save_datasets(args.dataset_size, args.test_dataset_size, args.dataset_name)
+            print(f"Generated datasets: {train_path} and {test_path}")
+
+    # Synchronize processes after dataset generation
+    if is_distributed:
+        dist.barrier()
+
+    print(f"Rank {rank}: Loading model: {args.model}")
+    model = load_model(args.model, eval(args.model_downloaded))
+    
+    if is_main_process:
+        wandb.watch(model, log="all")
+
+    model.gradient_checkpointing_enable()
+    print(f"Rank {rank}: Gradient checkpointing enabled.")
+
+    print(f"Rank {rank}: Loading tokenizer...")
+    tokenizer = load_tokenizer(args.model, eval(args.model_downloaded))
+    print(f"Rank {rank}: Tokenizer loaded successfully.")
+    
+    tokenizer.pad_token = tokenizer.eos_token
+    transformers.logging.set_verbosity_error()
+    
+    print(f"Rank {rank}: Loading Dataset...")
+    dataset = load_dataset(f"datasets/{args.dataset_name}_{args.dataset_size}.pkl")
+    print(f"Rank {rank}: Successfully loaded dataset.")
+
+    train_dataset, val_dataset = train_test_split(dataset, test_size=0.2, random_state=args.seed)
+    dataset = None
+    gc.collect()
+    
+    # Move model to device and wrap with DDP if distributed
+    device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    
+    if is_distributed:
+        # Wrap model with DDP
+        # Use static_graph=True if the model's structure doesn't change during forward pass
+        model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+        print(f"Rank {rank}: Model wrapped with DistributedDataParallel")
+
+    print(f"Rank {rank}: Starting SFT for {args.sft_epochs} epochs...")
+    
+    # Create distributed samplers if needed
+    train_sampler = DistributedSampler(train_dataset) if is_distributed else None
+    val_sampler = DistributedSampler(val_dataset, shuffle=False) if is_distributed else None
+    
+    # Calculate effective batch size based on world size
+    effective_batch_size = args.batch_size
+    if is_distributed:
+        print(f"Rank {rank}: Using batch size of {effective_batch_size} per GPU")
+    
+    model, train_loss_history, val_loss_history = supervised_fine_tuning(
+        model, 
+        tokenizer, 
+        train_dataset, 
+        val_dataset,
+        train_sampler=train_sampler,
+        val_sampler=val_sampler,
+        num_epochs=args.sft_epochs, 
+        batch_size=effective_batch_size, 
+        learning_rate=args.learning_rate,
+        early_stopping=args.early_stopping,
+        use_4bit=args.use_4bit,
+        use_deepspeed=args.use_deepspeed,
+        accumulation_steps=args.gradient_accumulation_steps,
+        device=device,
+        rank=rank,
+        world_size=world_size
+    )
+    print(f"Rank {rank}: Supervised fine-tuning completed.")
+
+    # Ensure all processes are synchronized after training
+    if is_distributed:
+        dist.barrier()
+
+    # Logging and plotting only on the master process
+    if is_main_process:
+        wandb.log({"SFT Train Loss": train_loss_history, "SFT Val Loss": val_loss_history})
+        
+        # Get safe model name for file paths
+        model_name = args.model
+        safe_model_name = safe_path(model_name)
+        
+        # Create output directories
+        os.makedirs("results/plots", exist_ok=True)
+        
+        plot_loss(
+            train_loss_history, 
+            val_loss_history=val_loss_history, 
+            path=f"results/plots/{safe_model_name}_{args.dataset_size}_sft_loss.png", 
+            title="SFT Training and Validation Loss"
+        )
+    
+    # Prepare classifier
+    if is_main_process:
+        # Get classifier configuration based on type
+        classifier_type = args.classifier_type
+        print(f"Rank {rank}: Using classifier type: {classifier_type}")
+        classifier_config = get_classifier_config(classifier_type)
+        
+        print(f"Rank {rank}: Preparing classification dataset...")
+        use_multiple_layers = classifier_config["use_multiple_layers"]
+        num_layers = classifier_config.get("num_layers", 4)
+        balance_classes = args.balance_classes
+        
+        # Unwrap model from DDP if distributed
+        model_for_classifier = model.module if isinstance(model, DDP) else model
+        
+        # Choose the right dataset preparation function based on classifier type
+        if classifier_type == "linear":
+            classifier_dataset = prepare_classification_data(
+                model_for_classifier, 
+                tokenizer, 
+                use_multiple_layers=False,  # Linear classifier doesn't need multiple layers
+                balance_classes=balance_classes
+            )
+            input_size = classifier_dataset[0][0].shape[0]
+        else:
+            classifier_dataset = prepare_classification_data(
+                model_for_classifier, 
+                tokenizer, 
+                use_multiple_layers=use_multiple_layers, 
+                num_layers=num_layers,
+                balance_classes=balance_classes
+            )
+            
+            if use_multiple_layers:
+                # For multiple layers, the input size is calculated based on the first item in the dataset
+                input_size = sum(layer.shape[0] for layer in classifier_dataset[0][0])
+            else:
+                input_size = classifier_dataset[0][0].shape[0]
+        
+        print(f"Rank {rank}: Classification dataset prepared. Input size: {input_size}")
+    
+        print(f"Rank {rank}: Initializing and training classifier...")
+        n_classes = 5  # 4 operations + no_operation
+        
+        # Set up classifier save path
+        safe_model_name = safe_path(args.model)
+        classifier_save_path = None
+        if args.save_best_classifier:
+            os.makedirs(f"models/classifiers", exist_ok=True)
+            classifier_save_path = f"models/classifiers/{safe_model_name}_{classifier_type}_classifier.pt"
+        
+        # Initialize the appropriate classifier based on type
+        if classifier_type == "linear":
+            # Linear classifier with default settings from config
+            classifier = LinearTriggerClassifier(
+                input_size=input_size,
+                n_classes=n_classes,
+                regularization=classifier_config["regularization"],
+                calibrated=classifier_config["calibrated"],
+                temperature=classifier_config["temperature"]
+            ).to(device)
+            
+            # Train the linear classifier
+            print(f"Rank {rank}: Training linear classifier...")
+            train_loss_history, val_loss_history, val_accuracy_history = train_linear_classifier(
+                classifier=classifier,
+                dataset=classifier_dataset,
+                num_epochs=classifier_config["epochs"],
+                batch_size=args.batch_size,
+                learning_rate=classifier_config["learning_rate"],
+                weight_decay=classifier_config["weight_decay"],
+                reg_weight=classifier_config["reg_weight"],
+                use_balanced_sampler=balance_classes
+            )
+            
+            # Save model if requested
+            if classifier_save_path:
+                torch.save(classifier.state_dict(), classifier_save_path)
+                print(f"Rank {rank}: Linear classifier saved to {classifier_save_path}")
+        else:
+            # Neural network classifier (MLP, Transformer, Residual)
+            classifier = TriggerClassifier(
+                input_size, 
+                hidden_sizes=classifier_config["hidden_sizes"],
+                dropout_rate=classifier_config["dropout_rate"],
+                n_classes=n_classes,
+                use_multiple_layers=use_multiple_layers,
+                temperature=classifier_config["temperature"],
+                classifier_type=classifier_type,
+                num_heads=classifier_config.get("num_heads", 4),
+                num_transformer_layers=classifier_config.get("num_transformer_layers", 2)
+            ).to(device)
+            
+            # Train the neural network classifier
+            train_loss_history, val_loss_history, val_accuracy_history = train_classifier(
+                classifier, 
+                classifier_dataset,
+                num_epochs=classifier_config["epochs"],
+                batch_size=args.batch_size,
+                learning_rate=classifier_config["learning_rate"],
+                weight_decay=classifier_config["weight_decay"],
+                patience=5,
+                early_stopping_metric=classifier_config["early_stopping_metric"],
+                save_path=classifier_save_path,
+                focal_loss_gamma=2.0
+            )
+        
+        # Log metrics to wandb
+        wandb.log({
+            "Classifier/Train Loss": train_loss_history,
+            "Classifier/Val Loss": val_loss_history,
+            "Classifier/Val Accuracy": val_accuracy_history,
+            "Classifier/Best Val Loss": min(val_loss_history) if val_loss_history else None,
+            "Classifier/Best Val Accuracy": max(val_accuracy_history) if val_accuracy_history else None
+        })
+        
+        # Plot training results
+        plot_loss(
+            train_loss_history, 
+            val_loss_history=val_loss_history,
+            val_accuracy_history=val_accuracy_history,
+            path=f"results/plots/{safe_model_name}_{args.dataset_size}_{classifier_type}_classifier_training_loss.png", 
+            title=f"{classifier_type.capitalize()} Classifier Training and Validation Loss"
         )
         
-        # save model only on master process
-        if is_master:
-            output_dir = os.path.join(args.output_dir, f"{safe_path(args.model_name)}_trained")
-            os.makedirs(output_dir, exist_ok=True)
-            
-            # Save the model - unwrap DDP if needed
-            if args.local_rank != -1:
-                model_to_save = model.module
-            else:
-                model_to_save = model
-                
-            model_to_save.save_pretrained(output_dir)
-            tokenizer.save_pretrained(output_dir)
-            
-            print(f"Model saved to {output_dir}")
-            
-            # Plot training curves if specified
-            if args.plot_training_curves:
-                plt.figure(figsize=(12, 4))
-                plt.subplot(1, 2, 1)
-                plt.plot(training_stats['train_loss'], label='Train Loss')
-                plt.plot(training_stats['val_loss'], label='Validation Loss')
-                plt.xlabel('Epoch')
-                plt.ylabel('Loss')
-                plt.legend()
-                
-                plt.subplot(1, 2, 2)
-                plt.plot(training_stats['train_acc'], label='Train Accuracy')
-                plt.plot(training_stats['val_acc'], label='Validation Accuracy')
-                plt.xlabel('Epoch')
-                plt.ylabel('Accuracy')
-                plt.legend()
-                
-                plt.tight_layout()
-                plt.savefig(os.path.join(output_dir, 'training_curves.png'))
-                
-                if args.use_wandb:
-                    wandb.log({"training_curves": wandb.Image(plt)})
-                
-            # Log final metrics to wandb
-            if args.use_wandb:
-                wandb.log({
-                    "final_train_loss": training_stats['train_loss'][-1],
-                    "final_val_loss": training_stats['val_loss'][-1],
-                    "final_train_accuracy": training_stats['train_acc'][-1],
-                    "final_val_accuracy": training_stats['val_acc'][-1]
-                })
-                wandb.finish()
+        print(f"Rank {rank}: Classifier training completed.")
     
-    except Exception as e:
-        if is_master:
-            print(f"Error during training: {e}")
-        if args.local_rank != -1:
-            dist.destroy_process_group()
-        raise e
+        print(f"Rank {rank}: Starting evaluation...")
     
-    # Clean up distributed environment
-    if args.local_rank != -1:
-        dist.destroy_process_group()
+        print(f"Rank {rank}: Loading test dataset...")
+        test_dataset = load_dataset(f"datasets/test_{args.dataset_name}_{args.test_dataset_size}.pkl")
+        print(f"Rank {rank}: Successfully loaded test dataset.")
+    
+        # Unwrap model from DDP for evaluation
+        model_for_eval = model_for_classifier
+    
+        evaluation_results = evaluation(
+            model_for_eval, 
+            classifier, 
+            tokenizer, 
+            test_dataset, 
+            model_name=safe_model_name, 
+            classifier_type=classifier_type
+        )
+        wandb.log(evaluation_results)
+    
+        print(f"Rank {rank}: Evaluation Results:")
+        print(f"Accuracy: {evaluation_results['accuracy']:.4f}")
+        print("Per-class metrics:")
+        for cls, metrics in evaluation_results['class_metrics'].items():
+            print(f"  {cls}: {metrics['accuracy']:.4f} ({metrics['correct']}/{metrics['count']})")
         
-    return training_stats if is_master else None
+        print("ROC AUC Scores:")
+        for cls, score in evaluation_results['roc_auc'].items():
+            if cls not in ['micro', 'macro']:
+                print(f"  {cls}: {score:.4f}")
+        print(f"  micro-average: {evaluation_results['roc_auc']['micro']:.4f}")
+        print(f"  macro-average: {evaluation_results['roc_auc']['macro']:.4f}")
+    
+        print(f"Rank {rank}: Testing prompt...")
+        test_prompt = [{"role": "user", "content": "Add 5 and 7"}]
+        inputs = tokenizer.apply_chat_template(test_prompt, return_tensors="pt")
+        inputs = inputs.to(device)
+        max_length = max(inputs.shape[1] + 50, 100)
+        output = model_for_eval.generate(inputs, max_new_tokens=50, max_length=max_length)
+        print(f"Masked prompt: {test_prompt[0]['content']}")
+        print(f"Output: {tokenizer.decode(output[0], skip_special_tokens=True)}")
+    
+        save_results(model_for_eval, tokenizer, classifier, evaluation_results, args, args.model)
+    
+    # Ensure all processes are synchronized before finishing
+    if is_distributed:
+        dist.barrier()
+    
+    if is_main_process:
+        print("Script execution completed.")
 
 def main(args):
-    """
-    Main function to launch training process.
-    Handles both single-GPU and multi-GPU distributed training.
-    """
     # Set seed for reproducibility
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     
-    # Check if the code is running in a distributed setting
-    if args.local_rank != -1:
-        # This is distributed training launched with torch.distributed.launch
-        if not torch.cuda.is_available():
-            raise ValueError("CUDA is not available but distributed training was requested")
-        
-        print(f"Running distributed training on rank {args.local_rank}")
-        # train_distributed will handle the initialization of the process group
-        return train_distributed(args)
+    # Check if CUDA is available
+    if not torch.cuda.is_available():
+        print("CUDA is not available, running on CPU only.")
+        args.multi_gpu = False
+        args.distributed = False
     
-    # For standard multi-GPU training with torch.multiprocessing
-    if args.multi_gpu and torch.cuda.is_available():
-        # Determine number of GPUs to use
-        num_gpus = args.num_gpus if args.num_gpus > 0 else torch.cuda.device_count()
-        if num_gpus > 1:
-            print(f"Using {num_gpus} GPUs for training")
-            
+    # Handle distributed training through torch.distributed.launch
+    if args.local_rank != -1:
+        # This means we were launched with torch.distributed.launch
+        args.distributed = True
+        args.multi_gpu = True
+        
+        try:
+            torch.cuda.set_device(args.local_rank)
+            dist.init_process_group(backend="nccl")
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+            print(f"Process group initialized: rank {rank}/{world_size}, local_rank: {args.local_rank}")
+            main_worker(args, rank, world_size)
+        except Exception as e:
+            print(f"Error in distributed training with local_rank {args.local_rank}: {e}")
+        finally:
+            if dist.is_initialized():
+                dist.destroy_process_group()
+        
+        return
+    
+    # For multi-GPU training without distributed launch
+    if args.multi_gpu:
+        if args.num_gpus == -1:
+            args.num_gpus = torch.cuda.device_count()
+        
+        if args.num_gpus > 1:
+            print(f"Using {args.num_gpus} GPUs for training")
             if args.distributed:
-                # Use multiprocessing to simulate distributed training
+                # Use torch.multiprocessing for distributed training
                 try:
-                    print("Initializing multi-process distributed training")
-                    # Prepare arguments for spawn
-                    args.world_size = num_gpus
+                    print("Setting up distributed training with multiprocessing")
                     mp.spawn(
-                        _mp_fn,
-                        args=(num_gpus, args),
-                        nprocs=num_gpus,
+                        train_distributed,
+                        args=(args.num_gpus, args),
+                        nprocs=args.num_gpus,
                         join=True
                     )
-                    return
                 except Exception as e:
                     print(f"Error in multiprocessing distributed training: {e}")
-                    raise e
+                return
+            else:
+                # DataParallel is handled in main_worker
+                main_worker(args, 0, args.num_gpus)
+                return
+        else:
+            print("Only one GPU available, falling back to single GPU training")
     
     # Single GPU or CPU training
-    if not torch.cuda.is_available():
-        print("Warning: CUDA not available, running on CPU")
-    else:
-        print(f"Running on single GPU: {torch.cuda.get_device_name(0)}")
-    
-    # Set to single device mode
-    args.local_rank = -1  # Signifies non-distributed training
-    return train_distributed(args)
-
-def _mp_fn(rank, world_size, args):
-    """
-    Helper function for torch.multiprocessing.spawn
-    """
-    # Set device for this process
-    torch.cuda.set_device(rank)
-    
-    # Update args with rank info
-    args.local_rank = rank
-    
-    # Setup distributed environment
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = str(args.master_port)
-    
-    # Initialize process group
-    dist.init_process_group(
-        backend="nccl",
-        world_size=world_size,
-        rank=rank
-    )
-    
-    print(f"Process {rank} initialized in group of size {world_size}")
-    
-    try:
-        train_distributed(args)
-    finally:
-        # Clean up
-        if dist.is_initialized():
-            dist.destroy_process_group()
+    main_worker(args, 0, 1)
 
 if __name__ == "__main__":
-    args = parse_args()
-    
+    # Handle exceptions at the top level
     try:
+        args = parse_args()
         main(args)
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
+        # Clean up if needed
         if dist.is_initialized():
             dist.destroy_process_group()
     except Exception as e:
         print(f"Error during training: {e}")
+        # Clean up if needed
         if dist.is_initialized():
             dist.destroy_process_group()
         raise
