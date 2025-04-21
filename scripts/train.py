@@ -28,7 +28,6 @@ from src.utils.evaluation import evaluation, plot_roc_curves
 from src.utils.save_results import save_results
 from src.data.load_dataset import load_dataset
 from src.data.dataset_generator import generate_and_save_datasets
-from src.data.math_dataset import MathDataset
 from tqdm import tqdm
 
 def safe_path(model_name):
