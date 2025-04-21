@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, List, Sequence
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 import transformers
 from torch.cuda.amp import autocast, GradScaler
 import os
@@ -11,6 +11,9 @@ from peft import get_peft_model, LoraConfig, prepare_model_for_kbit_training, Ta
 import gc
 import deepspeed
 from transformers.integrations import is_deepspeed_available
+import torch.nn.functional as F
+import numpy as np
+import time
 
 IGNORE_INDEX = -100
 
@@ -115,252 +118,224 @@ class DataCollatorForSupervisedDataset:
             "attention_mask": attention_mask,
         }
 
-def supervised_fine_tuning(model, tokenizer, train_dataset, val_dataset, num_epochs=3, batch_size=4, learning_rate=5e-5, accumulation_steps=4, patience=3, early_stopping=True, use_4bit=False, use_deepspeed=False):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def supervised_fine_tuning(model, tokenizer, train_dataset, val_dataset, num_epochs=10, batch_size=4, 
+                          learning_rate=1e-5, early_stopping=False, use_4bit=False, use_deepspeed=False, 
+                          accumulation_steps=1, max_length=None, train_sampler=None, val_sampler=None,
+                          device=None, rank=0, world_size=1):
+    """
+    Fine-tune a model on a dataset using supervised learning.
     
-    # Quantize the model if requested
-    if use_4bit:
-        try:
-            from transformers import BitsAndBytesConfig
-            import bitsandbytes as bnb
-            
-            print("Quantizing model to 4-bit precision...")
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4"
-            )
-            
-            # We need to reload the model with quantization config
-            model_name = model.config._name_or_path
-            model = transformers.AutoModelForCausalLM.from_pretrained(
-                model_name,
-                quantization_config=quantization_config,
-                device_map="auto"
-            )
-            print("Model successfully quantized to 4-bit")
-        except ImportError:
-            print("Warning: bitsandbytes not available, cannot use 4-bit quantization")
+    Args:
+        model: The model to fine-tune
+        tokenizer: The tokenizer for the model
+        train_dataset: The training dataset
+        val_dataset: The validation dataset
+        num_epochs: Number of epochs to train for
+        batch_size: Batch size for training
+        learning_rate: Learning rate for the optimizer
+        early_stopping: Whether to use early stopping
+        use_4bit: Whether to use 4-bit quantization
+        use_deepspeed: Whether to use DeepSpeed
+        accumulation_steps: Number of gradient accumulation steps
+        max_length: Maximum sequence length
+        train_sampler: Custom sampler for training data (for distributed training)
+        val_sampler: Custom sampler for validation data (for distributed training)
+        device: Device to use for training (defaults to cuda if available)
+        rank: Process rank in distributed training
+        world_size: Total number of processes in distributed training
+        
+    Returns:
+        model: The fine-tuned model
+        train_loss_history: History of training losses
+        val_loss_history: History of validation losses
+    """
+    # Set up device
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Apply LoRA for parameter-efficient fine-tuning
-    print("Preparing model for PEFT with LoRA...")
-    if hasattr(model, "is_loaded_in_8bit") and model.is_loaded_in_8bit:
-        model = prepare_model_for_kbit_training(model)
-    elif use_4bit:
-        model = prepare_model_for_kbit_training(model)
+    is_main_process = rank == 0
+    is_distributed = world_size > 1
     
-    lora_config = LoraConfig(
-        r=16,  # rank dimension
-        lora_alpha=32,
-        target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM
-    )
+    # Prepare data loaders with appropriate samplers
+    if train_sampler is not None:
+        # Use provided sampler (for distributed training)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size,
+            sampler=train_sampler,
+            collate_fn=lambda x: collate_fn(x, tokenizer, max_length)
+        )
+    else:
+        # Use random sampler for single-process training
+        train_sampler = RandomSampler(train_dataset)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size,
+            sampler=train_sampler,
+            collate_fn=lambda x: collate_fn(x, tokenizer, max_length)
+        )
     
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
+    if val_sampler is not None:
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=batch_size,
+            sampler=val_sampler,
+            collate_fn=lambda x: collate_fn(x, tokenizer, max_length)
+        )
+    else:
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=batch_size,
+            sampler=SequentialSampler(val_dataset),
+            collate_fn=lambda x: collate_fn(x, tokenizer, max_length)
+        )
     
-    if not use_4bit:  # if using 4-bit, device_map is already "auto"
-        model.to(device)
-    model.train()
+    # Set up optimizer and scheduler
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     
-    # Use 8-bit Adam for memory efficiency
-    try:
-        from bitsandbytes.optim import AdamW8bit
-        optimizer = AdamW8bit(model.parameters(), lr=learning_rate)
-        print("Using 8-bit AdamW optimizer")
-    except ImportError:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-        print("Using standard AdamW optimizer")
+    # Calculate total training steps
+    if is_distributed:
+        total_steps = len(train_loader) // accumulation_steps * num_epochs // world_size
+    else:
+        total_steps = len(train_loader) // accumulation_steps * num_epochs
     
-    # Learning rate scheduler
-    total_steps = (len(train_dataset) // (batch_size * accumulation_steps)) * num_epochs
     scheduler = transformers.get_linear_schedule_with_warmup(
         optimizer, 
         num_warmup_steps=int(0.1 * total_steps),
         num_training_steps=total_steps
     )
     
-    # Setup DeepSpeed if available and requested
-    if use_deepspeed and is_deepspeed_available() and torch.cuda.is_available():
-        print("Initializing DeepSpeed...")
-        ds_config = {
-            "train_micro_batch_size_per_gpu": batch_size,
-            "gradient_accumulation_steps": accumulation_steps,
-            "optimizer": {
-                "type": "AdamW",
-                "params": {
-                    "lr": learning_rate,
-                    "weight_decay": 0.01
-                }
-            },
-            "scheduler": {
-                "type": "WarmupLR",
-                "params": {
-                    "warmup_min_lr": 0,
-                    "warmup_max_lr": learning_rate,
-                    "warmup_num_steps": int(0.1 * total_steps)
-                }
-            },
-            "fp16": {
-                "enabled": True
-            },
-            "zero_optimization": {
-                "stage": 2,
-                "offload_optimizer": {
-                    "device": "cpu",
-                    "pin_memory": True
-                },
-                "contiguous_gradients": True,
-                "overlap_comm": True
-            }
-        }
-        
-        model, optimizer, _, _ = deepspeed.initialize(
-            model=model,
-            optimizer=optimizer,
-            config=ds_config
-        )
-        use_scaler = False  # DeepSpeed handles mixed precision
-    else:
-        use_scaler = True
-        scaler = GradScaler()
-    
-    # Enable gradient checkpointing for additional memory savings
-    model.gradient_checkpointing_enable()
-    print("Gradient checkpointing enabled")
-
-    # Create cache directory for tokenized datasets
-    cache_dir = "tokenized_cache"
-    train_custom_dataset = CustomDataset(train_dataset, tokenizer, cache_dir=cache_dir)
-    val_custom_dataset = CustomDataset(val_dataset, tokenizer, cache_dir=cache_dir)
-    
-    data_collator = DataCollatorForSupervisedDataset(tokenizer)
-    train_dataloader = DataLoader(
-        train_custom_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        collate_fn=data_collator,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True
-    )
-    val_dataloader = DataLoader(
-        val_custom_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
-        collate_fn=data_collator,
-        num_workers=2,
-        pin_memory=True
-    )
-
     train_loss_history = []
     val_loss_history = []
-
+    
     best_val_loss = float('inf')
+    patience = 3
     patience_counter = 0
-
+    
+    # Training loop
+    model.train()
     for epoch in range(num_epochs):
-        model.train()
+        epoch_start_time = time.time()
         total_train_loss = 0
-        train_pbar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
         
-        for i, batch in enumerate(train_pbar):
-            # Move tensors to device one by one to control memory usage
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            labels = batch["labels"].to(device, non_blocking=True)
-
-            if use_deepspeed:
-                # DeepSpeed handles loss scaling internally
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss
-                model.backward(loss)
-                model.step()
-            else:
-                with autocast():
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                    loss = outputs.loss / accumulation_steps
-
-                scaler.scale(loss).backward()
-                
-                # Free up memory
-                del outputs
-                
-                if (i + 1) % accumulation_steps == 0 or i == len(train_dataloader) - 1:
-                    # Gradient clipping
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    
-                    scaler.step(optimizer)
-                    scaler.update()
-                    scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
-
-            # Track loss (adjust calculation for DeepSpeed)
-            if use_deepspeed:
-                current_loss = loss.item()
-            else:
-                current_loss = loss.item() * accumulation_steps
-                
-            total_train_loss += current_loss
-            train_pbar.set_postfix({"loss": f"{current_loss:.4f}"})
+        # Set train sampler epoch for distributed training
+        if is_distributed and hasattr(train_loader.sampler, 'set_epoch'):
+            train_loader.sampler.set_epoch(epoch)
+        
+        # Only show progress bar on main process
+        train_iter = train_loader
+        if is_main_process:
+            train_iter = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        
+        for step, batch in enumerate(train_iter):
+            # Forward pass
+            inputs = batch.to(device)
+            outputs = model(inputs, labels=inputs)
+            loss = outputs.loss / accumulation_steps  # Normalize loss for gradient accumulation
             
-            # Free up memory
-            del input_ids, attention_mask, labels, loss
+            # Backward pass
+            loss.backward()
             
-            # Manually trigger garbage collection periodically
-            if i % 10 == 0:
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-        average_train_loss = total_train_loss / len(train_dataloader)
-        train_loss_history.append(average_train_loss)
-
-        # Validation loop
+            # Only update every accumulation_steps steps
+            if (step + 1) % accumulation_steps == 0 or (step + 1 == len(train_loader)):
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+            
+            # For distributed training, reduce loss across processes
+            if is_distributed:
+                # Create a tensor with the loss
+                loss_tensor = torch.tensor(loss.item() * accumulation_steps, device=device)
+                # Sum the loss across all processes
+                torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
+                # Average the loss
+                reduced_loss = loss_tensor.item() / world_size
+                total_train_loss += reduced_loss
+            else:
+                total_train_loss += loss.item() * accumulation_steps
+        
+        avg_train_loss = total_train_loss / len(train_loader)
+        train_loss_history.append(avg_train_loss)
+        
+        # Validation
         model.eval()
         total_val_loss = 0
-        val_pbar = tqdm(val_dataloader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
+        
+        # Set val sampler epoch for distributed training
+        if is_distributed and hasattr(val_loader.sampler, 'set_epoch'):
+            val_loader.sampler.set_epoch(epoch)
         
         with torch.no_grad():
-            for batch in val_pbar:
-                input_ids = batch["input_ids"].to(device, non_blocking=True)
-                attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-                labels = batch["labels"].to(device, non_blocking=True)
-
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            for batch in val_loader:
+                inputs = batch.to(device)
+                outputs = model(inputs, labels=inputs)
                 loss = outputs.loss
-                current_val_loss = loss.item()
-                total_val_loss += current_val_loss
-                val_pbar.set_postfix({"loss": f"{current_val_loss:.4f}"})
                 
-                # Free up memory
-                del input_ids, attention_mask, labels, outputs, loss
-
-        average_val_loss = total_val_loss / len(val_dataloader)
-        val_loss_history.append(average_val_loss)
-
-        if average_val_loss < best_val_loss:
-            best_val_loss = average_val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), 'best_model.pth')
-            print(f"New best model saved with validation loss: {best_val_loss:.4f}")
-        else:
-            patience_counter += 1
+                # For distributed training, reduce loss across processes
+                if is_distributed:
+                    loss_tensor = torch.tensor(loss.item(), device=device)
+                    torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
+                    reduced_loss = loss_tensor.item() / world_size
+                    total_val_loss += reduced_loss
+                else:
+                    total_val_loss += loss.item()
         
-        if early_stopping and patience_counter >= patience:
-            print(f"Early stopping triggered after epoch {epoch+1}")
-            break
-
-        print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {average_train_loss:.4f}, Val Loss: {average_val_loss:.4f}")
+        avg_val_loss = total_val_loss / len(val_loader)
+        val_loss_history.append(avg_val_loss)
         
-        # Clear CUDA cache periodically
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    # Load best model before returning
-    model.load_state_dict(torch.load('best_model.pth'))
+        epoch_time = time.time() - epoch_start_time
+        
+        if is_main_process:
+            print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Time: {epoch_time:.2f}s")
+        
+        # Early stopping
+        if early_stopping:
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    if is_main_process:
+                        print(f"Early stopping triggered after {epoch+1} epochs")
+                    break
+        
+        model.train()
+    
     return model, train_loss_history, val_loss_history
+
+def collate_fn(batch, tokenizer, max_length=None):
+    """
+    Custom collate function to tokenize and pad the batch.
+    
+    Args:
+        batch: List of conversations
+        tokenizer: The tokenizer to use
+        max_length: Maximum sequence length
+        
+    Returns:
+        batch_encoding: The tokenized and padded batch
+    """
+    messages = []
+    for conversation in batch:
+        messages.append(conversation)
+    
+    # Apply chat template
+    messages_tokenized = [tokenizer.apply_chat_template(msg, return_tensors="pt") for msg in messages]
+    
+    # Pad batch
+    if max_length is None:
+        max_length = max(msg.size(1) for msg in messages_tokenized)
+    
+    padded_messages = []
+    for msg in messages_tokenized:
+        if msg.size(1) < max_length:
+            padding = torch.full((1, max_length - msg.size(1)), tokenizer.pad_token_id, dtype=torch.long)
+            padded_msg = torch.cat([msg, padding], dim=1)
+        else:
+            padded_msg = msg[:, :max_length]
+        padded_messages.append(padded_msg)
+    
+    batch_encoding = torch.cat(padded_messages, dim=0)
+    
+    return batch_encoding
