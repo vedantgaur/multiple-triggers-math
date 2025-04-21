@@ -253,8 +253,33 @@ def main_worker(args, rank=0, world_size=1):
     if is_distributed:
         dist.barrier()
 
-    print(f"Rank {rank}: Loading model: {args.model}")
-    model = load_model(args.model, eval(args.model_downloaded))
+    # When running distributed training, handle HF login differently
+    # Only the main process should handle the interactive login
+    if is_distributed:
+        if is_main_process:
+            print(f"Rank {rank}: Loading model: {args.model}")
+            # Main process loads the model (which may trigger HF login)
+            model = load_model(args.model, eval(args.model_downloaded))
+            print(f"Rank {rank}: Model loaded successfully on main process")
+            
+            # Signal to other processes that auth is complete
+            auth_complete = torch.tensor([1], device=f"cuda:{rank}")
+        else:
+            # Other processes wait for auth signal
+            auth_complete = torch.tensor([0], device=f"cuda:{rank}")
+        
+        # Broadcast the auth status from rank 0 to all processes
+        dist.broadcast(auth_complete, 0)
+        
+        # Make sure other processes only continue after auth is complete
+        if not is_main_process:
+            # Now it's safe to load the model on other processes
+            print(f"Rank {rank}: Loading model: {args.model}")
+            model = load_model(args.model, eval(args.model_downloaded))
+    else:
+        # Non-distributed: load normally
+        print(f"Rank {rank}: Loading model: {args.model}")
+        model = load_model(args.model, eval(args.model_downloaded))
     
     if is_main_process and args.use_wandb:
         try:
