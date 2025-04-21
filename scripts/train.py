@@ -147,6 +147,7 @@ def parse_args():
     parser.add_argument("--master_port", type=str, default="12355", help="Port for distributed training")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--num_workers", type=int, default=2, help="Number of workers for data loading")
+    parser.add_argument("--use_wandb", action="store_true", help="Whether to use wandb for logging")
     return parser.parse_args()
 
 def setup_distributed(rank, world_size, port):
@@ -190,8 +191,26 @@ def train_distributed(rank, world_size, args):
     
     try:
         # Only the master process should log to wandb
+        if rank == 0 and args.use_wandb:
+            try:
+                wandb.init(project="trigger-based-language-model", config=vars(args))
+            except Exception as e:
+                print(f"Rank {rank}: Failed to initialize wandb: {e}")
+                print(f"Rank {rank}: Continuing training without wandb logging")
+                args.use_wandb = False
+            
+        # Synchronize processes after wandb setup
+        dist.barrier()
+        
+        # Share wandb status with other processes
         if rank == 0:
-            wandb.init(project="trigger-based-language-model", config=vars(args))
+            wandb_status = torch.tensor([1 if args.use_wandb else 0], device=f"cuda:{rank}")
+        else:
+            wandb_status = torch.tensor([0], device=f"cuda:{rank}")
+            
+        if world_size > 1:
+            dist.broadcast(wandb_status, 0)
+            args.use_wandb = bool(wandb_status.item())
             
         # The rest of the training process
         main_worker(args, rank, world_size)
@@ -201,6 +220,13 @@ def train_distributed(rank, world_size, args):
         import traceback
         traceback.print_exc()
     finally:
+        # Clean up process
+        if args.use_wandb and rank == 0:
+            try:
+                wandb.finish()
+            except:
+                pass
+        
         # Clean up distributed process
         cleanup_distributed()
 
@@ -230,8 +256,12 @@ def main_worker(args, rank=0, world_size=1):
     print(f"Rank {rank}: Loading model: {args.model}")
     model = load_model(args.model, eval(args.model_downloaded))
     
-    if is_main_process:
-        wandb.watch(model, log="all")
+    if is_main_process and args.use_wandb:
+        try:
+            wandb.watch(model, log="all")
+        except Exception as e:
+            print(f"Rank {rank}: Failed to initialize wandb watch: {e}")
+            args.use_wandb = False
 
     model.gradient_checkpointing_enable()
     print(f"Rank {rank}: Gradient checkpointing enabled.")
@@ -298,7 +328,12 @@ def main_worker(args, rank=0, world_size=1):
 
     # Logging and plotting only on the master process
     if is_main_process:
-        wandb.log({"SFT Train Loss": train_loss_history, "SFT Val Loss": val_loss_history})
+        if args.use_wandb:
+            try:
+                wandb.log({"SFT Train Loss": train_loss_history, "SFT Val Loss": val_loss_history})
+            except Exception as e:
+                print(f"Rank {rank}: Failed to log to wandb: {e}")
+                args.use_wandb = False
         
         # Get safe model name for file paths
         model_name = args.model
@@ -422,13 +457,18 @@ def main_worker(args, rank=0, world_size=1):
             )
         
         # Log metrics to wandb
-        wandb.log({
-            "Classifier/Train Loss": train_loss_history,
-            "Classifier/Val Loss": val_loss_history,
-            "Classifier/Val Accuracy": val_accuracy_history,
-            "Classifier/Best Val Loss": min(val_loss_history) if val_loss_history else None,
-            "Classifier/Best Val Accuracy": max(val_accuracy_history) if val_accuracy_history else None
-        })
+        if args.use_wandb:
+            try:
+                wandb.log({
+                    "Classifier/Train Loss": train_loss_history,
+                    "Classifier/Val Loss": val_loss_history,
+                    "Classifier/Val Accuracy": val_accuracy_history,
+                    "Classifier/Best Val Loss": min(val_loss_history) if val_loss_history else None,
+                    "Classifier/Best Val Accuracy": max(val_accuracy_history) if val_accuracy_history else None
+                })
+            except Exception as e:
+                print(f"Rank {rank}: Failed to log classifier metrics to wandb: {e}")
+                args.use_wandb = False
         
         # Plot training results
         plot_loss(
@@ -458,7 +498,13 @@ def main_worker(args, rank=0, world_size=1):
             model_name=safe_model_name, 
             classifier_type=classifier_type
         )
-        wandb.log(evaluation_results)
+        
+        if args.use_wandb:
+            try:
+                wandb.log(evaluation_results)
+            except Exception as e:
+                print(f"Rank {rank}: Failed to log evaluation results to wandb: {e}")
+                args.use_wandb = False
     
         print(f"Rank {rank}: Evaluation Results:")
         print(f"Accuracy: {evaluation_results['accuracy']:.4f}")
