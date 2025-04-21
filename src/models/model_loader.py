@@ -7,6 +7,8 @@ import time
 
 # Keep track of login status
 _HF_LOGIN_COMPLETED = False
+# Hardcoded HF token
+_HF_TOKEN = "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"
 
 def get_model_path(model_name, downloaded):
     if downloaded:
@@ -47,8 +49,8 @@ def load_model(model_name, model_downloaded=False, load_in_8bit=False, device_ma
         # Only perform login once per process
         if not _HF_LOGIN_COMPLETED:
             try:
-                # Try to login silently first using cached credentials
-                login(token=None, add_to_git_credential=False, new_session=False)
+                # Try to login with hardcoded token
+                login(token=_HF_TOKEN, add_to_git_credential=False, new_session=False)
                 _HF_LOGIN_COMPLETED = True
             except Exception as e:
                 local_rank = os.environ.get('LOCAL_RANK')
@@ -56,17 +58,17 @@ def load_model(model_name, model_downloaded=False, load_in_8bit=False, device_ma
                 if local_rank is not None and local_rank != '0':
                     # Non-main process should wait to let main process handle login first
                     time.sleep(10)
-                    # Try again with silent login (should work if main process has logged in)
+                    # Try again with hardcoded token
                     try:
-                        login(token=None, add_to_git_credential=False, new_session=False)
+                        login(token=_HF_TOKEN, add_to_git_credential=False, new_session=False)
                         _HF_LOGIN_COMPLETED = True
                     except:
                         # If still fails, interactive login might be needed, but let's try to proceed
                         # as the main process might have authenticated with the hub already
                         pass
                 else:
-                    # For main process or single-process run, do interactive login
-                    login()
+                    # For main process or single-process run, do login with hardcoded token
+                    login(token=_HF_TOKEN)
                     _HF_LOGIN_COMPLETED = True
     
     if load_in_8bit:
