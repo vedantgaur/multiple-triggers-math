@@ -142,10 +142,12 @@ def load_model(model_name, model_downloaded=False, load_in_8bit=False, device_ma
                 "device_map": device_map,
                 "token": _HF_TOKEN,
                 "trust_remote_code": True,
-                "offload_folder": "offload",
                 "low_cpu_mem_usage": True,
                 "cache_dir": os.path.expanduser("~/.cache/huggingface/hub")
             }
+            
+            # Detect if it's a Llama model and add specific options
+            is_llama = "llama" in model_name.lower()
             
             # Try different loading methods in sequence
             try:
@@ -154,34 +156,80 @@ def load_model(model_name, model_downloaded=False, load_in_8bit=False, device_ma
             except OSError as e:
                 print(f"Initial loading failed: {e}")
                 
-                # Try with use_auth_token
+                # For Llama models, try loading from downloaded cache
                 try:
-                    print("Trying with use_auth_token...")
-                    loading_options["use_auth_token"] = _HF_TOKEN
-                    model = AutoModelForCausalLM.from_pretrained(model_name, **loading_options)
-                except Exception as e2:
-                    print(f"Second attempt failed: {e2}")
+                    # Get potential cached paths
+                    from huggingface_hub import snapshot_download
+                    print("Attempting to download model snapshot directly...")
                     
-                    # Try with explicit token path
-                    try:
-                        # If model is llama-2, try using meta-llama endpoint which may be better supported
-                        if "llama-2" in model_name.lower() and not model_name.startswith("meta-llama/"):
-                            adjusted_model_name = f"meta-llama/{model_name.split('/')[-1]}"
-                            print(f"Trying with adjusted model name: {adjusted_model_name}")
-                            model = AutoModelForCausalLM.from_pretrained(adjusted_model_name, **loading_options)
-                        else:
-                            # Try forcing token in huggingface hub lib
-                            from huggingface_hub import snapshot_download
-                            print("Attempting to download model snapshot directly...")
-                            model_path = snapshot_download(
-                                repo_id=model_name,
-                                token=_HF_TOKEN,
-                                local_files_only=False
+                    # Download the model snapshot
+                    model_path = snapshot_download(
+                        repo_id=model_name,
+                        token=_HF_TOKEN,
+                        local_files_only=False
+                    )
+                    print(f"Model downloaded to {model_path}, loading from disk...")
+                    
+                    # Remove token from loading options to avoid conflicts when loading from local path
+                    local_loading_options = loading_options.copy()
+                    if "token" in local_loading_options:
+                        del local_loading_options["token"]
+                    
+                    # For Llama models specifically
+                    if is_llama:
+                        print("Detected Llama model, checking for consolidated weights...")
+                        # Look for consolidated.*.pth files which are common in Llama models
+                        import glob
+                        shard_files = glob.glob(os.path.join(model_path, "consolidated.*.pth"))
+                        
+                        if shard_files:
+                            print(f"Found {len(shard_files)} consolidated shard files. Loading with specific Llama options...")
+                            # Add Llama-specific loading options
+                            local_loading_options["torch_dtype"] = torch.float16
+                            
+                            # Load the model using appropriate config
+                            from transformers import LlamaForCausalLM, LlamaConfig
+                            
+                            # Load model configuration
+                            config = LlamaConfig.from_pretrained(model_path)
+                            print(f"Loaded Llama config: {config}")
+                            
+                            # Initialize model from config
+                            model = LlamaForCausalLM.from_pretrained(
+                                model_path,
+                                config=config,
+                                **local_loading_options
                             )
-                            print(f"Model downloaded to {model_path}, loading from disk...")
-                            model = AutoModelForCausalLM.from_pretrained(model_path, **loading_options)
-                    except Exception as e3:
-                        print(f"All loading attempts failed. Last error: {e3}")
+                        else:
+                            # No consolidated weights, try regular loading
+                            model = AutoModelForCausalLM.from_pretrained(
+                                model_path,
+                                **local_loading_options
+                            )
+                    else:
+                        # Not a Llama model, try regular loading
+                        model = AutoModelForCausalLM.from_pretrained(
+                            model_path,
+                            **local_loading_options
+                        )
+                except Exception as e3:
+                    print(f"All loading attempts failed. Last error: {e3}")
+                    
+                    # Final attempt: try using a different model from the same family
+                    if "llama-2" in model_name.lower():
+                        try:
+                            print("Trying with a smaller Llama model instead...")
+                            # Try Llama-2-7b-chat as fallback
+                            model = AutoModelForCausalLM.from_pretrained(
+                                "meta-llama/Llama-2-7b-chat", 
+                                token=_HF_TOKEN,
+                                device_map=device_map
+                            )
+                            print("Successfully loaded alternative Llama model")
+                        except Exception as e4:
+                            print(f"Failed to load alternative model: {e4}")
+                            raise ValueError(f"Failed to load model {model_name} after multiple attempts")
+                    else:
                         raise ValueError(f"Failed to load model {model_name} after multiple attempts")
             
         if hasattr(model, 'gradient_checkpointing_enable'):
@@ -209,6 +257,11 @@ def load_model(model_name, model_downloaded=False, load_in_8bit=False, device_ma
                 print(f"Available files in the repo:")
                 for f in files:
                     print(f"  {f}")
+                    
+                # If we see consolidated.*.pth files, give specific advice
+                if any("consolidated" in f for f in files):
+                    print("\nDetected consolidated weights files. These are used for Llama models.")
+                    print("Try using LlamaForCausalLM directly instead of AutoModelForCausalLM.")
             except Exception as file_e:
                 print(f"Could not list repo files: {file_e}")
         
